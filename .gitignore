@@ -1,0 +1,71 @@
+# 太虚幻境 .gitignore
+
+# ========== 敏感配置 ==========
+.secret_key
+.access_token
+.env
+config.json
+config.json.bak*
+
+# ========== Python ==========
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+*.egg
+venv/
+.venv/
+
+# ========== 测试/缓存 ==========
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+tests/__pycache__/
+
+# ========== 开发测试文件（不入库） ==========
+test_*.py
+recon_*.png
+test_*.png
+fix_*.py
+*.bat.bak*
+.test_world_id
+
+# ========== 日志 ==========
+*.log
+
+# ========== 数据库 ==========
+*.db
+*.db-shm
+*.db-wal
+
+# ========== 用户数据 ==========
+saves/
+data/
+
+# ========== 生成的图片 ==========
+static/images/
+
+# ========== 打包输出 ==========
+dist/
+*.rar
+*.zip
+*.7z
+
+# ========== Node.js ==========
+node_modules/
+frontend-vue/dist/
+frontend-vue/.env.local
+frontend-vue/.env.*.local
+
+# ========== IDE ==========
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ========== OS ==========
+.DS_Store
+Thumbs.db

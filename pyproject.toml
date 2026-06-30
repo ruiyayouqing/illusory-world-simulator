@@ -1,0 +1,26 @@
+[tool.ruff]
+# 太虚幻境 — 虚拟世界人生模拟器 代码风格配置
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle 错误
+    "W",   # pycodestyle 警告
+    "F",   # pyflakes
+    "I",   # isort 导入排序
+    "N",   # pep8-naming 命名规范
+    "UP",  # pyupgrade 现代化语法
+]
+ignore = [
+    "E501",  # 行长度（由 formatter 处理）
+    "E402",  # 模块级导入不在顶部（turn_processor_v2.py 有后置导入）
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = true

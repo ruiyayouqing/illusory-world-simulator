@@ -1,0 +1,129 @@
+{
+  "llm": {
+    "api_key": "",
+    "base_url": "https://api.deepseek.com",
+    "model_name": "deepseek-v4-flash",
+    "temperature": 0.8,
+    "max_tokens": 0
+  },
+  "cheap_llm": {
+    "api_key": "",
+    "base_url": "https://api.siliconflow.cn/v1",
+    "model_name": "deepseek-ai/DeepSeek-V4-Flash",
+    "enabled": false
+  },
+  "image": {
+    "api_key": "",
+    "base_url": "",
+    "model_name": "",
+    "image_size": "1024x576",
+    "auto_generate": false
+  },
+  "embedding": {
+    "api_key": "",
+    "base_url": "",
+    "model_name": "BAAI/bge-m3"
+  },
+  "llm_profiles": {},
+  "image_profiles": {},
+  "active_llm_profile": "",
+  "active_image_profile": "",
+  "game": {
+    "auto_save": true,
+    "max_short_term_memory": 20,
+    "npc_offline_evolution": true,
+    "narrative_style": "大白话",
+    "narrative_style_custom": "",
+    "narrative_perspective": "third",
+    "economy_enabled": false,
+    "narrative_max_chars": 1000,
+    "streaming_enabled": true,
+    "action_validation_enabled": false
+  },
+  "v10": {
+    "narrative_reviewer": {
+      "enabled": true,
+      "review_interval": 10,
+      "max_lessons": 30
+    },
+    "npc_procedural_memory": {
+      "enabled": true,
+      "max_entries_per_npc": 30,
+      "evolve_interval_days": 10
+    },
+    "world_task_board": {
+      "enabled": true,
+      "max_active_tasks": 20,
+      "auto_assign": true
+    },
+    "memory_curator": {
+      "enabled": true,
+      "curate_interval": 15,
+      "max_archived_memories": 200
+    },
+    "butterfly_approval_gate": {
+      "enabled": true,
+      "approval_threshold": 7
+    },
+    "layered_memory": {
+      "importance_weight": 0.25,
+      "time_decay_half_life_days": 30,
+      "emotional_weight": 0.1
+    },
+    "foreshadow_lifecycle": {
+      "enabled": false,
+      "reminder_mode": "normal",
+      "stale_threshold_days": 30
+    },
+    "continuity_auditor": {
+      "enabled": true,
+      "audit_interval": 10
+    },
+    "multi_agent_narrative": {
+      "enabled": true,
+      "sensitivity": "low",
+      "max_revisions": 1
+    }
+  },
+  "narrative_styles": {
+    "章回体": "以章回体小说风格撰写，每段以「话说」「且说」等开头，以「欲知后事如何，且听下回分解」等收尾。语言半文半白，节奏舒缓，注重铺垫和悬念。",
+    "半古半文": "文言句式与白话叙事交融，类似《明朝那些事儿》或《琅琊榜》的风格。句式简练有力，偶用典故，但不晦涩。叙事中带有说书人的口吻。",
+    "大白话": "现代口语化叙事，轻松幽默，像朋友在讲故事。短句为主，偶尔吐槽，贴近当代网文读者的阅读习惯。不用文言词汇。",
+    "严肃文学": "冷峻克制的文学风格，类似余华、莫言。注重细节描写和心理刻画，语言凝练，情感内敛。",
+    "网文爽文": "快节奏网文风格，爽点密集，系统提示频繁。数据化呈现（战力值/经验值），升级打怪，装逼打脸。",
+    "诗化散文": "意境优先的散文风格，注重景物描写和氛围营造，语言优美，富有诗意。节奏缓慢，适合沉浸式体验。"
+  },
+  "ui": {
+    "theme": "parchment",
+    "accent_color": "#c9a96e",
+    "font_size": "medium",
+    "narrative_width": "55%",
+    "bg_color": "#0a0a0f",
+    "text_color": "#e0d5c1",
+    "panel_bg": "#111120",
+    "strip_gray_narrative": true
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8004,
+    "allowed_origins": [
+      "http://localhost:8004",
+      "http://127.0.0.1:8004"
+    ]
+  },
+  "fixed_prompt": {
+    "content": "输出的故事情节要符合逻辑及人物性格。必要时主角可以遭遇险境，重伤甚至死亡",
+    "enabled": true
+  },
+  "npc_info_visibility": "god",
+  "cheap_llm_profiles": {},
+  "active_cheap_llm_profile": "",
+  "dialogue_llm": {
+    "enabled": true,
+    "api_key": "",
+    "base_url": "",
+    "model_name": ""
+  },
+  "dialogue_llm_profiles": {},
+  "active_dialogue_llm_profile": ""
+}

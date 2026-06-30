@@ -1,0 +1,1099 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- [FIX] alpine-components.js must load BEFORE alpine.js so that the
+     'alpine:init' listener is registered before Alpine fires the event.
+     In Alpine v3.15+, alpine:init fires synchronously during Alpine.start()
+     which runs immediately after the Alpine script executes (defer order is
+     preserved, but the listener must exist before the event is dispatched). -->
+<script defer src="/js/alpine-components.js?v=6"></script>
+<script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
+<title>太虚幻境 - 虚拟世界人生模拟器</title>
+<link rel="stylesheet" href="/css/style.css?v=9">
+<style>
+.toast-success { background: linear-gradient(135deg, rgba(46,125,50,0.95), rgba(56,142,60,0.95)); color: white; }
+.toast-error { background: linear-gradient(135deg, rgba(198,40,40,0.95), rgba(211,47,47,0.95)); color: white; }
+.toast-info { background: linear-gradient(135deg, rgba(201,169,110,0.95), rgba(212,175,55,0.95)); color: #0d0c0f; }
+.v10-suggestion:hover { background: rgba(212,175,55,0.1); border-color: var(--gold); }
+</style>
+</head>
+<body x-data>
+
+<div id="bg-layer"></div>
+<div id="bg-vignette"></div>
+
+<div id="home">
+<div class="logo">太虚幻境</div>
+<div class="sub">虚拟世界人生模拟器 · 无限世界文字推演</div>
+<div class="hbox">
+<h2>创建新世界</h2>
+<div class="fg"><label>世界类型</label><select id="wt" onchange="onWorldTypeChange()"><option value="custom">自定义世界</option><option value="historical">历史穿越</option><option value="fantasy">奇幻冒险</option><option value="scifi">科幻未来</option><option value="postapocalyptic">末日生存</option><option value="wuxia">武侠江湖</option><option value="xianxia">修仙问道</option><option value="modern">现代生活</option><option value="urban_fantasy">都市异能</option></select></div>
+<div id="goldenFingerSection" style="display:none;margin:-8px 0 16px;padding:14px 16px;background:linear-gradient(135deg, rgba(212,175,55,.12), rgba(212,175,55,.05));border:1px solid rgba(212,175,55,.35);border-radius:10px">
+<label style="font-size:.9em;color:var(--text-bright);display:flex;align-items:center;gap:10px;cursor:pointer">
+<input type="checkbox" id="goldenFinger" style="width:auto"> ✨ 开启金手指（系统面板/超能力/现代物品具现化等）
+</label>
+<div id="gfDesc" style="font-size:.8em;color:var(--dim);margin-top:8px;line-height:1.5;padding-left:30px">关闭后，AI将严格遵循历史/现实逻辑，拒绝任何超自然元素。玩家尝试使用金手指时，系统会给出合理否定。</div>
+</div>
+<div class="fg"><label>描述你想要的世界</label><textarea id="wd" placeholder="例：穿越到明朝永乐年间，成为落魄书生" rows="3"></textarea></div>
+<div style="display:flex;gap:8px;margin-top:-8px;margin-bottom:14px">
+<button onclick="document.getElementById('fileInput').click()" class="upload-btn">📎 上传设定文件(.txt/.docx)</button>
+<input type="file" id="fileInput" accept=".txt,.docx" style="display:none" onchange="handleFileUpload(this)">
+<span id="fileInfo" style="color:var(--gold);font-size:.82em;line-height:32px"></span>
+</div>
+<div style="margin-bottom:14px;padding:10px 12px;background:rgba(212,175,55,.06);border:1px solid rgba(212,175,55,.2);border-radius:8px">
+  <div style="font-size:.88em;color:var(--gold);margin-bottom:8px">📚 世界书（可选）</div>
+  <div style="display:flex;gap:8px;align-items:center">
+    <button onclick="document.getElementById('lorebookFileInput').click()" style="padding:7px 14px;background:rgba(212,175,55,.15);border:1px solid rgba(212,175,55,.3);border-radius:6px;color:var(--gold);font-weight:500;font-size:.85em;cursor:pointer">上传世界书</button>
+    <input type="file" id="lorebookFileInput" accept=".json" style="display:none" onchange="handleLorebookUpload(this)">
+    <span id="lorebookFileInfo" style="color:var(--dim);font-size:.82em"></span>
+  </div>
+  <div style="font-size:.78em;color:var(--dim);margin-top:6px">上传世界书后，生成的世界将遵循世界书设定。支持 SillyTavern World Info 格式。</div>
+</div>
+<button class="btn" onclick="createWorld()">✨ 生成世界并开始冒险</button>
+<div class="settings-link"><span onclick="openSettings()">⚙️ 设置（API Key / 主题 / 文生图）</span></div>
+<div class="div">─── 或加载存档 ───</div>
+<div class="slist" id="slist"><div style="color:#5a4a3a;text-align:center;padding:12px">暂无存档</div></div>
+<div class="view-history-btn"><span onclick="openViewHistory()">📖 查看已有世界</span></div>
+</div>
+</div>
+
+<div id="game">
+
+<div id="sidebar">
+<div class="sidebar-btn" onclick="openWorldPanel()" title="世界面板">
+🌍<span class="tooltip">世界面板</span>
+</div>
+<div class="sidebar-btn" onclick="openMap()" title="地图">
+🗺️<span class="tooltip">世界地图</span>
+</div>
+<div class="sidebar-btn" onclick="doGraph()" title="关系">
+🔗<span class="tooltip">关系图谱</span>
+</div>
+<div class="sidebar-btn" onclick="openWhoIsWho()" title="名人谱">
+📜<span class="tooltip">名人谱</span>
+</div>
+<div class="sidebar-btn" onclick="openV10Panel()" title="v10面板">
+🔮<span class="tooltip">v10 面板</span>
+</div>
+<div class="sidebar-btn" onclick="openNpcPrediction()" title="NPC推演">
+🧠<span class="tooltip">NPC行动推演</span>
+</div>
+<div class="sidebar-spacer"></div>
+<div class="sidebar-btn" onclick="doMemoir()" title="回忆录">
+📖<span class="tooltip">回忆录</span>
+</div>
+<div class="sidebar-btn" onclick="doNovel()" title="小说">
+📚<span class="tooltip">生成小说</span>
+</div>
+<div class="sidebar-btn" onclick="doImage()" title="插图">
+🎨<span class="tooltip">生成插图</span>
+</div>
+<div class="sidebar-spacer"></div>
+<div class="sidebar-btn" onclick="doAdvance()" title="推进时间">
+⏭️<span class="tooltip">推进时间</span>
+</div>
+<div class="sidebar-btn" onclick="doSave()" title="存档">
+💾<span class="tooltip">手动存档</span>
+</div>
+<div class="sidebar-btn" onclick="openSettings()" title="设置">
+⚙️<span class="tooltip">设置</span>
+</div>
+<div class="sidebar-btn" onclick="doBack()" title="返回主页">
+🏠<span class="tooltip">返回主页</span>
+</div>
+</div>
+
+<div class="left">
+<div class="narr-header">
+<span class="wname" id="wn">--</span>
+<div class="header-right">
+<span class="time-status" id="time_status_bar" style="display:none">📅 --</span>
+<span class="divergence" id="div_rate" style="display:none">🌐 <span id="drate">0</span>%</span>
+<button class="header-icon-btn" onclick="openContextDebug()" title="AI上下文调试">🧠</button>
+</div>
+</div>
+<div class="narr-body" id="nb"></div>
+</div>
+
+<div class="right" id="rightPanel">
+
+<div class="character-portrait" id="char_portrait">
+<div class="portrait-avatar" id="pa">--</div>
+<div class="portrait-name" id="pn">--</div>
+<div class="portrait-title" id="pt">--</div>
+<div class="portrait-info">
+<span id="pi_age">--岁</span>
+<span>·</span>
+<span id="pi_rep">默默无闻</span>
+</div>
+</div>
+
+<div class="sec"><h3>❤️ 生命</h3>
+<div class="sr"><span class="sl">生命值</span><span class="sv" id="shv">--</span></div><div class="bar"><div class="bf bh" id="shb"></div></div>
+<div class="sr"><span class="sl">体力值</span><span class="sv" id="sev">--</span></div><div class="bar"><div class="bf be" id="seb"></div></div>
+</div>
+
+<div class="sec"><h3>📊 属性</h3>
+<div class="stat-grid">
+<div class="stat-item"><span class="stat-name">💪 力量</span><span class="stat-val" id="ss">--</span></div>
+<div class="stat-item"><span class="stat-name">🏃 敏捷</span><span class="stat-val" id="sag">--</span></div>
+<div class="stat-item"><span class="stat-name">🧠 智力</span><span class="stat-val" id="si">--</span></div>
+<div class="stat-item"><span class="stat-name">🍀 幸运</span><span class="stat-val" id="sl2">--</span></div>
+<div class="stat-item"><span class="stat-name">✨ 魔法</span><span class="stat-val" id="sm">--</span></div>
+<div class="stat-item"><span class="stat-name">💰 金币</span><span class="stat-val" id="sg" style="display:none">--</span></div>
+</div>
+</div>
+
+<div class="sec"><h3>⭐ 声望</h3>
+<div class="sr"><span class="sl">声望值</span><span class="sv" id="sr2">--</span></div>
+<div style="text-align:center;margin-top:8px"><span class="reputation-badge" id="sr_title">--</span></div>
+<div id="faction_rep" style="margin-top:12px"></div>
+</div>
+
+<div class="sec" style="display:none"><h3>📈 等级</h3><div id="lvl" style="font-size:.85em;color:var(--dim)">无等级系统</div></div>
+
+<div class="sec" id="ps_sec" style="display:none"><h3 id="ps_name">⚔️ 力量体系</h3><div id="ps_info" style="font-size:.85em;color:var(--dim)"></div></div>
+
+<div class="sec"><h3>🏷️ 标签</h3><div id="stg"></div></div>
+
+<div class="sec"><h3>💫 状态</h3><div id="sfx" style="color:var(--dim);font-size:.85em">正常</div></div>
+
+<div class="sec"><h3>🤝 关系</h3><div id="srl"></div></div>
+
+<div class="sec"><h3>🗺️ 世界地图</h3>
+<div class="map-preview" id="map_preview" onclick="openMap()">
+  <div class="map-preview-inner">
+    <div class="map-pin">📍</div>
+    <div class="map-info">
+      <div class="map-player-loc" id="map_player_loc">--</div>
+      <div class="map-stats"><span id="map_loc_count">0</span> 个地点 · <span id="map_npc_count">0</span> 个NPC</div>
+    </div>
+    <div class="map-expand-hint">→</div>
+  </div>
+</div>
+</div>
+
+<div class="sec"><h3>📜 名人谱</h3>
+<div class="map-preview" id="who_preview" onclick="openWhoIsWho()" style="background:linear-gradient(135deg,rgba(212,175,55,.08),rgba(139,105,20,.05))">
+  <div class="map-preview-inner">
+    <div class="map-pin">📜</div>
+    <div class="map-info">
+      <div class="map-player-loc" id="who_known_count">0 位已知人物</div>
+      <div class="map-stats" id="who_unknown_hint">还有 <span id="who_unknown_count">0</span> 位隐世高人</div>
+    </div>
+    <div class="map-expand-hint">→</div>
+  </div>
+</div>
+</div>
+
+<div class="sec" id="news_sec"><h3>📰 世界新闻 <span id="news_count" style="color:var(--dim);font-size:.8em"></span></h3><div class="news-feed" id="news_feed"><div style="color:var(--dim);text-align:center;padding:10px;font-size:.8em">暂无新闻</div></div><div class="news-expand" id="news_expand" style="display:none" onclick="toggleNewsExpand()">查看更多历史新闻 ▼</div></div>
+
+<div class="sec"><h3>⚡ 快捷操作</h3>
+<div class="abtns">
+<div class="abtn" onclick="doWhispers()">💭 脑内碎碎念</div>
+<div class="abtn" onclick="doMarket()" style="display:none">💰 市场行情</div>
+<div class="abtn" onclick="doViewChapters()">📑 查看小说</div>
+<div class="abtn" onclick="doButterfly()">🦋 蝴蝶效应</div>
+<div class="abtn" onclick="openAddNpc()">➕ 添加角色</div>
+<div class="abtn" onclick="openEditNpc()">✏️ 修改角色</div>
+<div class="abtn" onclick="openOutputLog()">📋 输出汇总</div>
+</div>
+</div>
+
+</div>
+
+<div class="opts">
+<div class="opts-title" id="ot">选择你的行动</div>
+<div class="opts-grid" id="og"></div>
+<div class="cust"><textarea id="ci" rows="2" placeholder="自由输入你的行动...（Enter发送，Shift+Enter换行）" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();doCustom()}"></textarea><button onclick="doCustom()">行动</button></div>
+</div>
+</div>
+
+<button class="toggle-right" id="toggleRight" onclick="toggleRightPanel()">☰</button>
+
+<div class="dice" id="dov"><div class="dice-box"><div style="color:var(--dim);margin-bottom:8px">🎲 骰子判定</div><div class="dice-val" id="dv">-</div><div class="dice-det" id="dd"></div></div></div>
+
+<div class="modal" id="stov" x-data="settingsPanel"><div class="modal-box settings-modal-box"><span class="close" onclick="closeSettings()">&times;</span><h2>⚙️ 游戏设置</h2>
+<!-- 标签栏 -->
+<div class="settings-tabs">
+  <div class="settings-tab active" data-tab="ai" onclick="switchSettingsTab('ai')">🤖 AI模型</div>
+  <div class="settings-tab" data-tab="narrative" onclick="switchSettingsTab('narrative')">✍️ 叙事</div>
+  <div class="settings-tab" data-tab="ui" onclick="switchSettingsTab('ui')">🖥️ 界面</div>
+  <div class="settings-tab" data-tab="game" onclick="switchSettingsTab('game')">🎮 游戏</div>
+  <div class="settings-tab" data-tab="advanced" onclick="switchSettingsTab('advanced')">🔧 高级</div>
+</div>
+
+<!-- 🤖 AI模型 标签页 -->
+<div id="tab-ai" class="settings-tab-content active">
+  <!-- 🧠 主力模型 -->
+  <div class="settings-section">
+    <div class="settings-section-title">🧠 主力模型</div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
+      <select id="st_llm_profile" onchange="applyProfile('llm')" style="flex:1;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"></select>
+      <button onclick="deleteProfile('llm')" style="padding:8px 12px;background:#5a2a2a;border:1px solid #9a5a5a;border-radius:8px;color:#c96e6e;font-size:.82em;cursor:pointer">删除</button>
+    </div>
+    <div class="fg"><label>API Key</label><input type="password" id="st_lk" x-model="config.llm.api_key" placeholder="API Key"></div>
+    <div class="fg"><label>Base URL</label><input type="text" id="st_lb" x-model="config.llm.base_url"></div>
+    <div class="fg"><label>模型名称</label><input type="text" id="st_lm" x-model="config.llm.model_name"></div>
+    <div class="fg"><label>输出Token限制</label>
+    <div style="display:flex;align-items:center;gap:8px">
+      <label style="font-size:.85em;color:var(--dim);cursor:pointer;white-space:nowrap"><input type="checkbox" id="st_maxtok_enabled" onchange="onMaxTokensToggle()"> 不限制</label>
+      <input type="number" id="st_maxtok" min="1024" max="131072" step="1024" placeholder="8192" style="flex:1;padding:8px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em" oninput="onMaxTokensInput()">
+    </div>
+    <div style="font-size:.75em;color:var(--dim);margin-top:4px">推理模型的思考过程会消耗此预算。不限制时由API默认值决定（通常16K-32K）。</div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <input type="text" id="st_llm_pname" placeholder="配置名称" style="flex:1;padding:8px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
+      <button onclick="saveProfile('llm')" style="padding:8px 16px;background:var(--gold);border:none;border-radius:8px;color:#0d0c0f;font-weight:700;font-size:.85em;cursor:pointer">存为配置</button>
+    </div>
+  </div>
+
+  <!-- ⚡ 廉价模型 -->
+  <div class="settings-section">
+    <div class="settings-section-title">⚡ 廉价模型</div>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <label style="font-size:.88em;color:var(--dim)"><input type="checkbox" id="st_cheap_enabled" x-model="config.cheap_llm.enabled"> 启用备用模型（简单任务用此模型，省钱更快）</label>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
+      <select id="st_cheap_profile" onchange="applyProfile('cheap')" style="flex:1;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"></select>
+      <button onclick="deleteProfile('cheap')" style="padding:8px 12px;background:#5a2a2a;border:1px solid #9a5a5a;border-radius:8px;color:#c96e6e;font-size:.82em;cursor:pointer">删除</button>
+    </div>
+    <div class="fg"><label>API Key</label><input type="password" id="st_cheap_lk" x-model="config.cheap_llm.api_key" placeholder="留空则不启用"></div>
+    <div class="fg"><label>Base URL</label><input type="text" id="st_cheap_lb" x-model="config.cheap_llm.base_url" placeholder="https://api.deepseek.com/v1"></div>
+    <div class="fg"><label>模型名称</label><input type="text" id="st_cheap_lm" x-model="config.cheap_llm.model_name" placeholder="如 deepseek-chat"></div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <input type="text" id="st_cheap_pname" placeholder="配置名称" style="flex:1;padding:8px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
+      <button onclick="saveProfile('cheap')" style="padding:8px 16px;background:var(--gold);border:none;border-radius:8px;color:#0d0c0f;font-weight:700;font-size:.85em;cursor:pointer">存为配置</button>
+    </div>
+    <div style="font-size:.78em;color:var(--dim);margin-top:8px;padding:8px 10px;background:rgba(212,175,55,.05);border-radius:6px">💡 简单任务（分类/评分）优先用廉价模型；主模型失败时自动降级</div>
+  </div>
+
+  <!-- [v11] 对话模型已屏蔽，所有内容走主力模型
+  <div class="settings-section">
+    <div class="settings-section-title">💬 对话模型</div>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <label style="font-size:.88em;color:var(--dim)"><input type="checkbox" id="st_dlg_enabled" x-model="config.dialogue_llm.enabled"> 启用对话模型（游戏内叙事/NPC对话/选项生成走此模型）</label>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
+      <select id="st_dlg_profile" onchange="applyProfile('dialogue')" style="flex:1;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"></select>
+      <button onclick="deleteProfile('dialogue')" style="padding:8px 12px;background:#5a2a2a;border:1px solid #9a5a5a;border-radius:8px;color:#c96e6e;font-size:.82em;cursor:pointer">删除</button>
+    </div>
+    <div class="fg"><label>API Key</label><input type="password" id="st_dlg_lk" x-model="config.dialogue_llm.api_key" placeholder="留空则回退到主力模型"></div>
+    <div class="fg"><label>Base URL</label><input type="text" id="st_dlg_lb" x-model="config.dialogue_llm.base_url" placeholder="https://api.deepseek.com/v1"></div>
+    <div class="fg"><label>模型名称</label><input type="text" id="st_dlg_lm" x-model="config.dialogue_llm.model_name" placeholder="如 deepseek-chat"></div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <input type="text" id="st_dlg_pname" placeholder="配置名称" style="flex:1;padding:8px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
+      <button onclick="saveProfile('dialogue')" style="padding:8px 16px;background:var(--gold);border:none;border-radius:8px;color:#0d0c0f;font-weight:700;font-size:.85em;cursor:pointer">存为配置</button>
+    </div>
+  </div>
+  -->
+
+  <!-- 🎨 文生图 -->
+  <div class="settings-section">
+    <div class="settings-section-title">🎨 文生图</div>
+    <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
+      <select id="st_img_profile" onchange="applyProfile('image')" style="flex:1;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"></select>
+      <button onclick="deleteProfile('image')" style="padding:8px 12px;background:#5a2a2a;border:1px solid #9a5a5a;border-radius:8px;color:#c96e6e;font-size:.82em;cursor:pointer">删除</button>
+    </div>
+    <div class="fg"><label>API Key</label><input type="password" id="st_ik" x-model="config.image.api_key" placeholder="API Key"></div>
+    <div class="fg"><label>调用地址</label><input type="text" id="st_iu" x-model="config.image.base_url" placeholder="https://xxx/v1/images/generations"></div>
+    <div class="fg"><label>模型</label><input type="text" id="st_im" x-model="config.image.model_name"></div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <input type="text" id="st_img_pname" placeholder="配置名称" style="flex:1;padding:8px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
+      <button onclick="saveProfile('image')" style="padding:8px 16px;background:var(--gold);border:none;border-radius:8px;color:#0d0c0f;font-weight:700;font-size:.85em;cursor:pointer">存为配置</button>
+    </div>
+  </div>
+
+  <!-- 🔤 向量模型 -->
+  <div class="settings-section">
+    <div class="settings-section-title">🔤 文本向量（记忆检索）</div>
+    <div class="fg"><label>API Key</label><input type="password" id="st_ek" x-model="config.embedding.api_key" placeholder="SiliconFlow API Key"></div>
+    <div class="fg"><label>调用地址</label><input type="text" id="st_eu" x-model="config.embedding.base_url" placeholder="https://api.siliconflow.cn/v1"></div>
+    <div class="fg"><label>模型</label><input type="text" id="st_em" x-model="config.embedding.model_name" placeholder="BAAI/bge-m3"></div>
+    <div style="font-size:.78em;color:var(--dim);margin-top:8px;padding:8px 10px;background:rgba(212,175,55,.05);border-radius:6px">💡 用于记忆语义检索，推荐 BAAI/bge-m3（中英文双语，1024维）</div>
+  </div>
+</div>
+
+<!-- ✍️ 叙事 标签页 -->
+<div id="tab-narrative" class="settings-tab-content">
+  <!-- 写作风格 -->
+  <div class="settings-section">
+    <div class="settings-section-title">写作风格</div>
+    <div class="fg">
+      <select id="st_narrative_style" onchange="onStyleChange()" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
+        <option value="章回体">章回体 — 半文半白，《三言二拍》风格</option>
+        <option value="半古半文">半古半文 — 文言句式+白话叙事</option>
+        <option value="大白话">大白话 — 现代口语，轻松幽默</option>
+        <option value="严肃文学">严肃文学 — 冷峻克制，余华/莫言风格</option>
+        <option value="网文爽文">网文爽文 — 快节奏，爽点密集</option>
+        <option value="诗化散文">诗化散文 — 意境优先，诗意优美</option>
+        <option value="自定义">✏️ 自定义风格...</option>
+      </select>
+    </div>
+    <div id="custom_style_section" style="margin-bottom:12px;display:none">
+      <div class="fg"><label>自定义风格描述</label>
+        <textarea id="st_custom_style" rows="4" placeholder="描述你想要的写作风格，例如：使用短句为主，节奏明快；对话丰富，注重人物语言描写" style="width:100%;padding:10px 12px;background:rgba(0,0,0,.3);border:1px solid var(--gold);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button onclick="uploadStyleFile()" class="upload-btn">📎 上传风格文件(.txt)</button>
+        <input type="file" id="style_file_input" accept=".txt" style="display:none" onchange="handleStyleFile(this)">
+        <span id="style_file_info" style="color:var(--gold);font-size:.82em;line-height:32px"></span>
+      </div>
+    </div>
+    <div id="style_desc_preview" style="margin-bottom:12px;padding:10px 14px;background:rgba(212,175,55,.06);border:1px solid rgba(212,175,55,.2);border-radius:8px;font-size:.82em;color:var(--dim);line-height:1.5"></div>
+  </div>
+
+  <!-- 叙事视角 -->
+  <div class="settings-section">
+    <div class="settings-section-title">叙事视角</div>
+    <div class="fg">
+      <select id="st_narrative_perspective" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
+        <option value="second">第二人称 — "你"（沉浸感强，推荐）</option>
+        <option value="third">第三人称 — 角色名（如"张立"、"凌云"）</option>
+        <option value="first">第一人称 — "我"（内心独白感）</option>
+      </select>
+      <div style="font-size:.75em;color:var(--dim);margin-top:4px">统一叙事中的人称，避免混用"你"和角色名导致混乱。</div>
+    </div>
+  </div>
+
+  <!-- 叙事字数 -->
+  <div class="settings-section">
+    <div class="settings-section-title">叙事字数</div>
+    <div class="fg">
+      <label>每次叙事长度</label>
+      <div style="display:flex;align-items:center;gap:8px">
+        <input type="range" id="st_narrative_chars_slider" min="200" max="3000" step="100" value="1000" style="flex:1" oninput="onNarrativeCharsSlider()">
+        <span id="st_narrative_chars_value" style="min-width:50px;text-align:center;color:var(--gold);font-weight:600">1000</span>
+        <span style="color:var(--dim);font-size:.85em">字</span>
+      </div>
+      <div style="font-size:.75em;color:var(--dim);margin-top:4px">控制AI每次输出的叙事长度。较短=响应更快，较长=剧情更丰富</div>
+      <input type="hidden" id="st_narrative_max_chars" value="1000">
+    </div>
+  </div>
+
+  <!-- 流式输出 -->
+  <div class="settings-section">
+    <div class="settings-section-title">⚡ 输出模式</div>
+    <div class="fg">
+      <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="st_streaming_enabled" checked> 启用流式输出（逐字显示，打字效果）
+      </label>
+      <div style="font-size:.75em;color:var(--dim);margin-top:4px">关闭后使用传统HTTP模式（等AI写完一次性显示）。关闭流式可排查叙事截断问题。</div>
+    </div>
+    <div class="fg" style="margin-top:8px">
+      <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="st_action_validation"> 启用行动校验（拦截不合理的玩家输入）
+      </label>
+      <div style="font-size:.75em;color:var(--dim);margin-top:4px">开启后，系统会用AI判断玩家行动是否与当前剧情/世界观矛盾，不合理时提示修改。需要配置备用AI模型。</div>
+    </div>
+  </div>
+
+  <!-- 固定提示词 -->
+  <div class="settings-section">
+    <div class="settings-section-title">固定提示词</div>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <label style="font-size:.88em;color:var(--dim)"><input type="checkbox" id="st_fpe" x-model="config.fixed_prompt.enabled" checked> 启用固定提示词</label>
+    </div>
+    <div class="fg"><label>提示词内容</label><textarea id="st_fp" x-model="config.fixed_prompt.content" rows="4" placeholder="每次对话都会附加此提示词到所有AI请求末尾" style="width:100%;padding:10px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
+  </div>
+</div>
+
+<!-- 🖥️ 界面 标签页 -->
+<div id="tab-ui" class="settings-tab-content">
+  <!-- 主题 -->
+  <div class="settings-section">
+    <div class="settings-section-title">主题风格</div>
+    <div class="fg">
+      <select id="st_th" onchange="previewTheme()" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
+        <option value="obsidian">深色 · 黑曜石（经典暗金）</option>
+        <option value="midnight">深色 · 午夜蓝（静谧深邃）</option>
+        <option value="crimson">深色 · 暗红（哥特神秘）</option>
+        <option value="forest">深色 · 暗林（自然沉稳）</option>
+        <option value="parchment">浅色 · 羊皮纸（古籍质感）</option>
+        <option value="sakura">浅色 · 樱花（柔和淡雅）</option>
+        <option value="mint">浅色 · 薄荷（清新明快）</option>
+        <option value="ivory">浅色 · 象牙白（极简干净）</option>
+      </select>
+    </div>
+    <div id="theme_preview" style="margin:12px 0;padding:16px;border-radius:10px;border:1px solid var(--border);background:rgba(0,0,0,.2)">
+      <div style="font-size:.82em;color:var(--dim);margin-bottom:8px">预览效果</div>
+      <div id="tp_box" style="padding:14px;border-radius:8px">
+        <div id="tp_title" style="font-weight:600;margin-bottom:6px">太虚幻境 虚拟世界人生模拟器</div>
+        <div id="tp_text" style="font-size:.9em;line-height:1.6">你从偏厅起身，穿过回廊，阳光洒在青石板上。</div>
+        <div id="tp_dim" style="font-size:.8em;margin-top:6px">第3天 清晨 | 春季</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 字体 -->
+  <div class="settings-section">
+    <div class="settings-section-title">字体大小</div>
+    <div class="fg">
+      <select id="st_fs" x-model="config.ui.font_size" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
+        <option value="small">小</option>
+        <option value="medium">中</option>
+        <option value="large">大</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- 显示选项 -->
+  <div class="settings-section">
+    <div class="settings-section-title">显示选项</div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px"><input type="checkbox" id="st_strip_gray" x-model="config.ui.strip_gray_narrative" checked> 隐藏AI旁白/总结（灰色文字）</label>
+    </div>
+  </div>
+
+  <!-- NPC可见度 -->
+  <div class="settings-section">
+    <div class="settings-section-title">NPC信息可见度</div>
+    <div class="fg">
+      <select id="st_npc_visibility" x-model="config.npc_info_visibility" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
+        <option value="immersive">沉浸模式（逐步解锁，初始只知传闻）</option>
+        <option value="semi">半沉浸（显示名字和身份，秘密隐藏）</option>
+        <option value="god">上帝模式（全部信息可见）</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<!-- 🎮 游戏 标签页 -->
+<div id="tab-game" class="settings-tab-content">
+  <!-- 游戏功能 -->
+  <div class="settings-section">
+    <div class="settings-section-title">游戏功能</div>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px"><input type="checkbox" id="st_autosave" checked disabled> 自动存档（始终开启）</label>
+      <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px"><input type="checkbox" id="st_economy_enabled" x-model="config.game.economy_enabled"> 启用经济系统（市场价格波动/交易）</label>
+    </div>
+  </div>
+
+  <!-- 玩家提示 -->
+  <div class="settings-section">
+    <div class="settings-section-title">玩家提示</div>
+    <div style="font-size:.78em;color:var(--dim);margin-bottom:10px;padding:8px 10px;background:rgba(212,175,55,.05);border-radius:6px">
+      💡 玩家提示会显示在输入框上方，帮助玩家了解当前情境或提供操作指引
+    </div>
+    <div class="fg"><label>提示内容</label><textarea id="st_player_hint" rows="3" placeholder="例如：「你现在身处破庙，周围一片狼藉...」" style="width:100%;padding:10px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
+  </div>
+</div>
+
+<!-- 🔧 高级 标签页 -->
+<div id="tab-advanced" class="settings-tab-content">
+  <!-- v10功能开关 -->
+  <div class="settings-section">
+    <div class="settings-section-title">📖 叙事审查器</div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px"><input type="checkbox" id="st_v10_reviewer_enabled" checked> 启用叙事审查器</label>
+      <div style="display:flex;gap:12px;padding-left:24px">
+        <div class="fg" style="flex:1"><label>审查间隔</label><input type="number" id="st_v10_reviewer_interval" value="10" min="5" max="100" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+        <div class="fg" style="flex:1"><label>最大教训数</label><input type="number" id="st_v10_reviewer_lessons" value="30" min="5" max="100" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="settings-section">
+    <div class="settings-section-title">👤 NPC程序记忆</div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px"><input type="checkbox" id="st_v10_npc_memory_enabled" checked> 启用NPC程序记忆</label>
+      <div style="display:flex;gap:12px;padding-left:24px">
+        <div class="fg" style="flex:1"><label>最大条目</label><input type="number" id="st_v10_npc_memory_max" value="30" min="5" max="100" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+        <div class="fg" style="flex:1"><label>演化间隔(天)</label><input type="number" id="st_v10_npc_memory_evolve" value="10" min="1" max="50" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="settings-section">
+    <div class="settings-section-title">📋 世界任务板</div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px"><input type="checkbox" id="st_v10_taskboard_enabled" checked> 启用世界任务板</label>
+      <div style="display:flex;gap:12px;padding-left:24px">
+        <div class="fg" style="flex:1"><label>最大任务数</label><input type="number" id="st_v10_taskboard_max" value="20" min="5" max="50" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+        <label style="font-size:.85em;color:var(--dim);display:flex;align-items:center;gap:6px;padding-top:20px"><input type="checkbox" id="st_v10_taskboard_auto" checked> 自动分配</label>
+      </div>
+    </div>
+  </div>
+
+  <div class="settings-section">
+    <div class="settings-section-title">🧠 记忆整理器</div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px"><input type="checkbox" id="st_v10_curator_enabled" checked> 启用记忆整理器</label>
+      <div style="display:flex;gap:12px;padding-left:24px">
+        <div class="fg" style="flex:1"><label>整理间隔</label><input type="number" id="st_v10_curator_interval" value="15" min="5" max="100" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+        <div class="fg" style="flex:1"><label>最大归档</label><input type="number" id="st_v10_curator_max" value="200" min="50" max="1000" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="settings-section">
+    <div class="settings-section-title">🦋 蝴蝶审批门</div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px"><input type="checkbox" id="st_v10_butterfly_enabled"> 启用蝴蝶审批门</label>
+      <div style="padding-left:24px">
+        <div class="fg"><label>影响阈值</label><input type="number" id="st_v10_butterfly_threshold" value="7.0" min="1" max="10" step="0.5" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+        <div style="font-size:.75em;color:var(--dim);margin-top:4px">高影响行为（超过此阈值）需要玩家确认</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="settings-section">
+    <div class="settings-section-title">📚 分层记忆</div>
+    <div style="display:flex;flex-direction:column;gap:8px;padding-left:24px">
+      <div class="fg"><label>重要性权重</label><input type="number" id="st_v10_memory_importance" value="0.25" min="0" max="1" step="0.05" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+      <div class="fg"><label>时间衰减周期(天)</label><input type="number" id="st_v10_memory_decay" value="30" min="7" max="365" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+      <div class="fg"><label>情感权重</label><input type="number" id="st_v10_memory_emotion" value="0.1" min="0" max="1" step="0.05" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+    </div>
+  </div>
+
+  <div class="settings-section">
+    <div class="settings-section-title">🎭 伏笔生命周期</div>
+    <div style="display:flex;flex-direction:column;gap:8px">
+      <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px"><input type="checkbox" id="st_v10_foreshadow_enabled" checked> 启用伏笔生命周期</label>
+      <div style="display:flex;gap:12px;padding-left:24px">
+        <div class="fg" style="flex:1"><label>提醒模式</label>
+          <select id="st_v10_foreshadow_mode" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em">
+            <option value="subtle">微妙</option>
+            <option value="normal" selected>正常</option>
+            <option value="obvious">明显</option>
+          </select>
+        </div>
+        <div class="fg" style="flex:1"><label>陈旧阈值(天)</label><input type="number" id="st_v10_foreshadow_stale" value="30" min="7" max="100" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="settings-section">
+    <div class="settings-section-title">🔍 连续性审计</div>
+    <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px"><input type="checkbox" id="st_v10_auditor_enabled" checked> 启用连续性审计</label>
+  </div>
+
+  <div class="settings-section">
+    <div class="settings-section-title">🤖 多智能体叙事</div>
+    <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px;margin-bottom:10px"><input type="checkbox" id="st_v10_multiagent_enabled" checked> 启用多智能体叙事（关键剧情时调用3个Agent协作生成）</label>
+    <div class="fg">
+      <label>触发灵敏度</label>
+      <select id="st_v10_multiagent_sensitivity" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
+        <option value="high">高（关键剧情触发多，质量优先）</option>
+        <option value="normal" selected>中（平衡模式，推荐）</option>
+        <option value="low">低（极少触发，速度优先）</option>
+      </select>
+      <div style="font-size:.75em;color:var(--dim);margin-top:4px">高=满足1个条件就触发，中=满足2个条件，低=满足3个条件</div>
+    </div>
+  </div>
+</div>
+
+<!-- 底部保存按钮 -->
+<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+  <button class="btn" onclick="saveSettings()" style="width:100%;padding:12px">
+    💾 保存设置
+  </button>
+</div>
+</div></div>
+
+<div class="modal" id="mov"><div class="modal-box"><span class="close" onclick="closeModal()">&times;</span><h2 id="mth"></h2><pre id="mtb"></pre></div></div>
+<div class="modal" id="outputLogModal"><div class="modal-box" style="width:800px;max-height:88vh"><span class="close" onclick="closeOutputLog()">&times;</span><h2>📋 AI输出汇总</h2>
+<div id="outputLogContent" style="max-height:75vh;overflow-y:auto;font-size:.88em;line-height:1.7;color:var(--text)"></div>
+</div></div>
+<div class="modal" id="rewindModal"><div class="modal-box" style="width:600px;max-height:85vh"><span class="close" onclick="closeRewindModal()">&times;</span>
+<h2>📜 百世书·时间回溯</h2>
+<div style="color:var(--dim);font-size:.88em;margin-bottom:16px;text-align:center">选择要回溯到的存档点，该存档之后的所有存档将被清除。</div>
+<div id="rewindSlotList" style="max-height:60vh;overflow-y:auto"></div>
+</div></div>
+<div class="modal" id="grmv"><div class="modal-box" style="width:780px"><span class="close" onclick="closeGraph()">&times;</span><h2>🔗 NPC关系图谱</h2>
+<div class="graph-legend"><span><span class="dot" style="background:var(--gold);box-shadow:0 0 8px rgba(212,175,55,.5)"></span>玩家</span><span><span class="dot" style="background:var(--accent-blue)"></span>NPC</span><span><span class="dot" style="background:var(--accent-green)"></span>友好</span><span><span class="dot" style="background:var(--accent-red)"></span>敌对</span></div>
+<div id="graphCanvas"></div>
+<div id="graphInfo" style="margin-top:12px;font-size:.85em;color:var(--dim)"></div></div></div>
+
+<div class="modal" id="mapModal"><div class="modal-box" style="width:920px;max-width:96vw;height:88vh;display:flex;flex-direction:column;padding:24px 28px;overflow:hidden"><span class="close" onclick="closeMap()">&times;</span><h2 style="margin:0 0 8px 0;flex-shrink:0">🗺️ 世界地图</h2>
+<div class="map-legend" style="flex-shrink:0;margin-bottom:8px"><span><span class="dot" style="background:var(--gold);box-shadow:0 0 10px rgba(212,175,55,.6)"></span>玩家位置</span><span><span class="dot" style="background:var(--accent-blue)"></span>地点</span><span style="color:var(--dim)">━━</span><span>路径</span></div>
+<div id="mapCanvas" style="width:100%;flex:1;min-height:300px;background:var(--bg-deep);border-radius:10px;border:1px solid var(--border)"></div>
+<div id="mapInfo" style="flex-shrink:0;margin-top:8px;font-size:.82em;color:var(--dim);display:flex;gap:20px;align-items:center">
+  <span id="map_node_count">0 地点</span>
+  <span id="map_edge_count">0 条路径</span>
+</div>
+<div id="mapDetail" style="display:none;flex-shrink:0;margin-top:8px;padding:12px 16px;background:rgba(212,175,55,.06);border:1px solid rgba(212,175,55,.2);border-radius:8px;font-size:.85em;max-height:25vh;overflow-y:auto">
+  <div id="mapDetailTitle" style="color:var(--gold);font-weight:600;margin-bottom:6px"></div>
+  <div id="mapDetailDesc" style="color:var(--dim);margin-bottom:6px"></div>
+  <div id="mapDetailNpcs" style="color:var(--text)"></div>
+</div></div></div>
+
+<div class="modal" id="whoModal"><div class="modal-box" style="width:920px;max-width:95vw;height:88vh;display:flex;flex-direction:column"><span class="close" onclick="closeWhoIsWho()">&times;</span>
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-shrink:0">
+<h2 style="margin:0">📜 名人谱</h2>
+<div style="display:flex;gap:10px;align-items:center">
+  <select id="who_visibility" onchange="setWhoVisibility(this.value)" style="padding:7px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
+    <option value="immersive">沉浸模式</option>
+    <option value="semi">半沉浸</option>
+    <option value="god">上帝模式</option>
+  </select>
+</div>
+</div>
+<div id="who_stats" style="font-size:.88em;color:var(--dim);margin-bottom:14px;flex-shrink:0"></div>
+<div id="who_rumors" style="margin-bottom:14px;flex-shrink:0"></div>
+<div id="who_content" style="flex:1;overflow-y:auto;padding-right:6px">
+<div style="color:var(--dim);text-align:center;padding:40px">加载中...</div>
+</div>
+<div id="who_detail" style="display:none;margin-top:14px;padding:14px 18px;background:rgba(212,175,55,.06);border:1px solid rgba(212,175,55,.2);border-radius:10px;flex-shrink:0;max-height:35vh;overflow-y:auto">
+  <div style="display:flex;justify-content:space-between;align-items:start;margin-bottom:10px">
+    <div>
+      <div id="who_detail_name" style="color:var(--gold);font-size:1.15em;font-weight:600"></div>
+      <div id="who_detail_title" style="color:var(--dim);font-size:.88em"></div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <div id="who_detail_knowledge" style="font-size:.82em;padding:4px 10px;border-radius:12px;background:rgba(212,175,55,.15);color:var(--gold)"></div>
+      <button onclick="exportCharacterCard()" style="padding:4px 10px;background:rgba(212,175,55,.15);border:1px solid rgba(212,175,55,.3);border-radius:6px;color:var(--gold);font-size:.8em;cursor:pointer" title="导出角色卡">📤 导出</button>
+    </div>
+  </div>
+  <div id="who_detail_body" style="font-size:.88em;line-height:1.7"></div>
+</div>
+</div></div>
+
+<div class="modal" id="addNpcModal"><div class="modal-box" style="width:520px"><span class="close" onclick="closeAddNpc()">&times;</span><h2>➕ 添加角色</h2>
+<div style="margin-bottom:14px;padding:10px 12px;background:rgba(212,175,55,.06);border:1px solid rgba(212,175,55,.2);border-radius:8px">
+  <div style="font-size:.88em;color:var(--gold);margin-bottom:8px">📇 导入角色卡</div>
+  <div style="display:flex;gap:8px;align-items:center">
+    <button onclick="document.getElementById('cardFileInput').click()" style="padding:7px 14px;background:var(--gold);border:none;border-radius:6px;color:#0d0c0f;font-weight:600;font-size:.85em;cursor:pointer">选择角色卡文件</button>
+    <input type="file" id="cardFileInput" accept=".json" style="display:none" onchange="handleCardImport(this)">
+    <span id="cardImportInfo" style="color:var(--dim);font-size:.82em"></span>
+  </div>
+  <div style="font-size:.78em;color:var(--dim);margin-top:6px">支持 SillyTavern Character Card V2 格式和太虚幻境角色卡格式</div>
+</div>
+<div class="fg"><label>名字 *</label><input type="text" id="npc_name" placeholder="例：小翠"></div>
+<div class="fg"><label>年龄</label><input type="number" id="npc_age" value="20" min="1" max="200"></div>
+<div class="fg"><label>职业/身份</label><input type="text" id="npc_role" placeholder="例：丫鬟、商人、侠客"></div>
+<div class="fg"><label>性格</label><input type="text" id="npc_personality" placeholder="例：活泼开朗、阴险狡诈"></div>
+<div class="fg"><label>说话风格</label><input type="text" id="npc_speaking" placeholder="例：粗犷豪放、文静内敛"></div>
+<div class="fg"><label>对话示例（每行一句）</label><textarea id="npc_examples" rows="3" placeholder='例：&#10;小翠：公子，茶来了。&#10;小翠：公子你又熬夜了，身体要紧啊。' style="width:100%;padding:10px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
+<div class="fg"><label>所在位置</label><input type="text" id="npc_location" placeholder="留空则跟随玩家位置"></div>
+<div style="display:flex;gap:10px">
+<div class="fg" style="flex:1"><label>与玩家关系</label><select id="npc_relation" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em" onchange="var c=$('npc_relation_custom');if(this.value==='__custom__'){c.style.display='block';c.focus();}else{c.style.display='none';}"><option value="陌生人">陌生人</option><option value="朋友">朋友</option><option value="师徒">师徒</option><option value="下属">下属</option><option value="爱人">爱人</option><option value="亲人">亲人</option><option value="敌人">敌人</option><option value="同门">同门</option><option value="主仆">主仆</option><option value="邻居">邻居</option><option value="生意伙伴">生意伙伴</option><option value="恩人">恩人</option><option value="仇人">仇人</option><option value="青梅竹马">青梅竹马</option><option value="未婚夫妻">未婚夫妻</option><option value="义兄弟">义兄弟</option><option value="__custom__">✏️ 自定义...</option></select><input type="text" id="npc_relation_custom" placeholder="输入自定义关系" style="display:none;width:100%;padding:9px 12px;margin-top:6px;background:rgba(0,0,0,.3);border:1px solid var(--gold);border-radius:8px;color:var(--text);font-size:.88em;outline:none"></div>
+<div class="fg" style="flex:1"><label>初始好感 (0-100)</label><input type="number" id="npc_favor" value="50" min="0" max="100"></div>
+</div>
+<div class="fg"><label>标签（逗号分隔）</label><input type="text" id="npc_tags" placeholder="例：侍女,心腹"></div>
+<button class="btn" onclick="doAddNpc()" style="margin-top:14px">确认添加</button>
+</div></div>
+
+<div class="modal" id="editNpcModal"><div class="modal-box" style="width:600px;max-height:88vh;overflow-y:auto"><span class="close" onclick="closeEditNpc()">&times;</span><h2>✏️ 修改角色</h2>
+<div class="fg"><label>选择角色</label><select id="edit_npc_select" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em" onchange="loadNpcForEdit()"><option value="">-- 请选择 --</option></select></div>
+<div id="editNpcForm" style="display:none">
+<div class="fg"><label>名字</label><input type="text" id="edit_npc_name"></div>
+<div class="fg"><label>年龄</label><input type="number" id="edit_npc_age" min="1" max="200"></div>
+<div class="fg"><label>职业/身份</label><input type="text" id="edit_npc_role"></div>
+<div class="fg"><label>MBTI性格类型</label><input type="text" id="edit_npc_mbti" placeholder="例：INTJ、ENFP"></div>
+<div class="fg"><label>性格描述</label><textarea id="edit_npc_personality" rows="2" style="width:100%;padding:10px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
+<div class="fg"><label>说话风格</label><input type="text" id="edit_npc_speaking"></div>
+<div class="fg"><label>对话示例（每行一句）</label><textarea id="edit_npc_examples" rows="3" style="width:100%;padding:10px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
+<div class="fg"><label>所在位置</label><input type="text" id="edit_npc_location"></div>
+<div style="display:flex;gap:10px">
+<div class="fg" style="flex:1"><label>与玩家关系</label><select id="edit_npc_relation" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"><option value="陌生人">陌生人</option><option value="朋友">朋友</option><option value="师徒">师徒</option><option value="下属">下属</option><option value="爱人">爱人</option><option value="亲人">亲人</option><option value="敌人">敌人</option><option value="同门">同门</option><option value="主仆">主仆</option><option value="邻居">邻居</option><option value="生意伙伴">生意伙伴</option><option value="恩人">恩人</option><option value="仇人">仇人</option><option value="青梅竹马">青梅竹马</option><option value="未婚夫妻">未婚夫妻</option><option value="义兄弟">义兄弟</option></select></div>
+<div class="fg" style="flex:1"><label>好感度 (0-100)</label><input type="number" id="edit_npc_favor" min="0" max="100"></div>
+</div>
+<div class="fg"><label>标签（逗号分隔）</label><input type="text" id="edit_npc_tags"></div>
+<h3 style="color:var(--accent);font-size:.85em;margin:14px 0 8px;padding-bottom:6px;border-bottom:1px solid var(--border)">⚔️ 战斗属性</h3>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+<div class="fg"><label>生命</label><input type="number" id="edit_stat_health" min="0"></div>
+<div class="fg"><label>最大生命</label><input type="number" id="edit_stat_max_health" min="1"></div>
+<div class="fg"><label>力量</label><input type="number" id="edit_stat_strength" min="0"></div>
+<div class="fg"><label>敏捷</label><input type="number" id="edit_stat_agility" min="0"></div>
+<div class="fg"><label>智力</label><input type="number" id="edit_stat_intelligence" min="0"></div>
+<div class="fg"><label>幸运</label><input type="number" id="edit_stat_luck" min="0"></div>
+</div>
+<h3 style="color:var(--accent);font-size:.85em;margin:14px 0 8px;padding-bottom:6px;border-bottom:1px solid var(--border)">🧠 AI行为</h3>
+<div class="fg"><label>当前目标</label><input type="text" id="edit_ai_goal"></div>
+<div class="fg"><label>长期目标</label><input type="text" id="edit_ai_long_goal"></div>
+<div class="fg"><label>决策风格</label><select id="edit_ai_style" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"><option value="normal">普通</option><option value="cautious">谨慎</option><option value="aggressive">激进</option><option value="passive">被动</option><option value="cunning">狡诈</option></select></div>
+<button class="btn" onclick="doEditNpc()" style="margin-top:16px;width:100%">💾 保存修改</button>
+</div>
+</div></div>
+
+<div id="toast" x-show="$store.app.toast" x-transition.opacity.duration.300ms
+     :class="{
+       'toast-success': $store.app.toastType === 'success',
+       'toast-error': $store.app.toastType === 'error',
+       'toast-info': $store.app.toastType === 'info'
+     }"
+     x-text="$store.app.toast"
+     style="position:fixed;top:24px;left:50%;transform:translateX(-50%);z-index:10000;padding:14px 28px;border-radius:10px;font-weight:500;box-shadow:0 6px 24px rgba(0,0,0,0.4);"></div>
+
+<div id="loadingOverlay" style="position:fixed;inset:0;z-index:9999;display:none;align-items:center;justify-content:center;flex-direction:column;gap:20px">
+  <canvas id="nebulaCanvas" style="position:absolute;inset:0;width:100%;height:100%;z-index:0"></canvas>
+  <div class="loading-spinner" style="position:relative;z-index:1"></div>
+  <div id="loadingText" style="color:var(--gold);font-size:1.1em;font-weight:600;letter-spacing:2px;position:relative;z-index:1;text-shadow:0 0 20px rgba(0,0,0,0.9),0 0 40px rgba(0,0,0,0.7)">加载中...</div>
+  <div id="loadingStage" style="color:rgba(180,210,255,0.7);font-size:.92em;letter-spacing:1px;min-height:1.4em;transition:opacity .4s ease;position:relative;z-index:1;text-shadow:0 0 15px rgba(0,0,0,0.9)"></div>
+</div>
+
+<script>
+// ========== 星云加载动画 ==========
+(function() {
+  var _nebulaCanvas = document.getElementById('nebulaCanvas');
+  var _nebulaCtx = _nebulaCanvas ? _nebulaCanvas.getContext('2d') : null;
+  var _nebulaRAF = null;
+  var _nebulaTime = 0;
+  var _nebulaStars = [];
+  var _nebulaDust = [];
+  var _nebulaClouds = [];
+  var _nebulaMeteors = [];
+  var _nebulaBlackHole = null;
+
+  var NEBULA_NUM_STARS = 600;
+  var NEBULA_NUM_DUST = 200;
+  var NEBULA_METEOR_COUNT = 4;
+
+  var _starColors = [
+    {hue:30,sat:90,light:70},{hue:0,sat:80,light:75},{hue:200,sat:70,light:80},
+    {hue:220,sat:80,light:85},{hue:50,sat:80,light:75},{hue:280,sat:70,light:70},
+  ];
+
+  function _nebulaInit() {
+    if (!_nebulaCanvas || !_nebulaCtx) return;
+    var W = _nebulaCanvas.width = window.innerWidth;
+    var H = _nebulaCanvas.height = window.innerHeight;
+
+    _nebulaStars = [];
+    for (var i = 0; i < NEBULA_NUM_STARS; i++) {
+      var col = _starColors[Math.floor(Math.random() * _starColors.length)];
+      _nebulaStars.push({
+        x: Math.random() * W, y: Math.random() * (H * 0.55),
+        radius: 0.4 + Math.random() * 2.5, brightness: 0.3 + Math.random() * 0.7,
+        phase: Math.random() * Math.PI * 2, speed: 0.4 + Math.random() * 0.3,
+        hue: col.hue + (Math.random()-0.5)*20, sat: col.sat,
+        light: col.light + (Math.random()-0.5)*20,
+      });
+    }
+
+    _nebulaDust = [];
+    for (var i = 0; i < NEBULA_NUM_DUST; i++) {
+      _nebulaDust.push({
+        x: Math.random()*W, y: Math.random()*(H*0.6),
+        radius: 0.2+Math.random()*1.0,
+        vx: (Math.random()-0.5)*0.3, vy: (Math.random()-0.5)*0.2-0.05,
+        alpha: 0.1+Math.random()*0.3, phase: Math.random()*Math.PI*2,
+      });
+    }
+
+    _nebulaClouds = [];
+    for (var i = 0; i < 6; i++) {
+      _nebulaClouds.push({
+        x: Math.random()*W*0.8+W*0.1, y: Math.random()*(H*0.45)+H*0.05,
+        radius: 100+Math.random()*250,
+        hue1: 220+Math.random()*80, hue2: (280+Math.random()*100)%360,
+        alpha: 0.06+Math.random()*0.12, rotation: Math.random()*Math.PI*2,
+        rotSpeed: (Math.random()-0.5)*0.008,
+        vx: (Math.random()-0.5)*0.15, vy: (Math.random()-0.5)*0.1,
+      });
+    }
+
+    _nebulaBlackHole = {
+      x: W*0.15+Math.random()*(W*0.7), y: H*0.1+Math.random()*(H*0.35),
+      radius: 25, angle: 0, speed: 0.025,
+    };
+
+    _nebulaMeteors = [];
+    for (var i = 0; i < NEBULA_METEOR_COUNT; i++) {
+      _nebulaMeteors.push(_nebulaCreateMeteor());
+    }
+  }
+
+  function _nebulaCreateMeteor() {
+    var W = _nebulaCanvas.width, H = _nebulaCanvas.height;
+    return {
+      x: Math.random()*W*0.85+W*0.05, y: Math.random()*(H*0.45),
+      vx: 2.5+Math.random()*6, vy: 1.2+Math.random()*3,
+      life: 0, maxLife: 70+Math.random()*160, active: true,
+      length: 80+Math.random()*120,
+    };
+  }
+
+  function _nebulaDrawStar(ctx, x, y, radius, brightness, hue, sat, light, alpha) {
+    var glow = radius * 5;
+    var grad = ctx.createRadialGradient(x, y, 0, x, y, glow);
+    var base = alpha * brightness;
+    grad.addColorStop(0, 'hsla('+hue+','+sat+'%,'+Math.min(light+25,100)+'%,'+base+')');
+    grad.addColorStop(0.5, 'hsla('+hue+','+sat+'%,'+light+'%,'+base*0.3+')');
+    grad.addColorStop(1, 'hsla('+hue+','+sat+'%,'+light+'%,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(x, y, glow, 0, Math.PI*2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x, y, radius*0.4, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(255,255,255,'+alpha*brightness*0.85+')';
+    ctx.fill();
+  }
+
+  function _nebulaDrawCloud(ctx, c, t) {
+    ctx.save();
+    ctx.globalAlpha = c.alpha;
+    ctx.translate(c.x + c.vx*t, c.y + c.vy*t);
+    ctx.rotate(c.rotation + c.rotSpeed*t);
+    for (var i = 0; i < 4; i++) {
+      var r = c.radius*(0.5+i*0.2);
+      var grad = ctx.createRadialGradient(0,0,0,0,0,r);
+      var h = (c.hue1+i*25)%360;
+      var l = 55+i*10;
+      grad.addColorStop(0, 'hsla('+h+',75%,'+l+'%,0.6)');
+      grad.addColorStop(0.5, 'hsla('+c.hue2+',65%,'+(l-10)+'%,0.3)');
+      grad.addColorStop(1, 'hsla('+h+',50%,30%,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(0,0,r,0,Math.PI*2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function _nebulaDrawBlackHole(ctx, bh, t) {
+    ctx.save();
+    var rot = bh.angle + bh.speed*t;
+    var glowR = bh.radius*6;
+    var gG = ctx.createRadialGradient(bh.x,bh.y,bh.radius*0.5,bh.x,bh.y,glowR);
+    gG.addColorStop(0,'rgba(180,200,255,0.2)');
+    gG.addColorStop(0.3,'rgba(100,130,255,0.12)');
+    gG.addColorStop(0.7,'rgba(60,40,150,0.06)');
+    gG.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle = gG;
+    ctx.beginPath(); ctx.arc(bh.x,bh.y,glowR,0,Math.PI*2); ctx.fill();
+
+    ctx.translate(bh.x, bh.y);
+    ctx.rotate(rot);
+    for (var i = 0; i < 20; i++) {
+      var r = bh.radius*(1.0+i*0.2);
+      var h = (200+i*14+t*0.6)%360;
+      ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2);
+      ctx.strokeStyle = 'hsla('+h+',85%,65%,0.12)';
+      ctx.lineWidth = 1.5+Math.sin(i*1.2+t*0.04)*1.2;
+      ctx.stroke();
+    }
+    for (var i = 0; i < 12; i++) {
+      var r = bh.radius*(0.9+i*0.15);
+      var h = (220+i*18+t*0.8)%360;
+      ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2);
+      ctx.strokeStyle = 'hsla('+h+',90%,75%,0.15)';
+      ctx.lineWidth = 2+Math.sin(i*1.8+t*0.05)*1.0;
+      ctx.stroke();
+    }
+    var gB = ctx.createRadialGradient(0,0,0,0,0,bh.radius);
+    gB.addColorStop(0,'rgba(0,0,0,1)');
+    gB.addColorStop(0.6,'rgba(0,0,0,0.95)');
+    gB.addColorStop(1,'rgba(40,60,140,0.4)');
+    ctx.fillStyle = gB;
+    ctx.beginPath(); ctx.arc(0,0,bh.radius,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(0,0,bh.radius*0.98,0,Math.PI*2);
+    ctx.strokeStyle = 'rgba(160,200,255,0.15)';
+    ctx.lineWidth = 2; ctx.stroke();
+    ctx.restore();
+  }
+
+  function _nebulaDrawMeteor(ctx, m) {
+    if (!m.active) return;
+    var progress = m.life / m.maxLife;
+    if (progress >= 1) return;
+    var fade = 1 - progress;
+    var x = m.x + m.vx*m.life;
+    var y = m.y + m.vy*m.life;
+    var len = m.length*(1-progress*0.3);
+    var angle = Math.atan2(m.vy, m.vx);
+    ctx.save();
+    ctx.globalAlpha = fade*0.95;
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    var grad = ctx.createLinearGradient(0,0,-len,0);
+    grad.addColorStop(0,'rgba(255,255,255,1)');
+    grad.addColorStop(0.3,'rgba(200,230,255,0.7)');
+    grad.addColorStop(1,'rgba(255,255,255,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(-len,-2.2,len,4.4);
+    ctx.beginPath(); ctx.arc(0,0,8,0,Math.PI*2);
+    ctx.fillStyle = 'rgba(255,255,255,'+0.5*fade+')';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function _nebulaFrame() {
+    if (!_nebulaCtx) return;
+    var W = _nebulaCanvas.width, H = _nebulaCanvas.height;
+    var ctx = _nebulaCtx;
+    _nebulaTime++;
+
+    var gB = 0.6 + 0.4*Math.sin(_nebulaTime*0.008);
+
+    // 背景
+    var bg = ctx.createRadialGradient(W/2,H/2,0,W/2,H/2,Math.max(W,H)*0.7);
+    bg.addColorStop(0,'#0a0a24');
+    bg.addColorStop(0.5,'#06061a');
+    bg.addColorStop(1,'#02020d');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0,0,W,H);
+
+    // 星云
+    for (var i = 0; i < _nebulaClouds.length; i++) {
+      _nebulaDrawCloud(ctx, _nebulaClouds[i], _nebulaTime);
+    }
+    // 星尘
+    for (var i = 0; i < _nebulaDust.length; i++) {
+      var p = _nebulaDust[i];
+      var px = p.x + p.vx*_nebulaTime;
+      var py = p.y + p.vy*_nebulaTime;
+      var flicker = 0.5+0.5*Math.sin(_nebulaTime*0.01+p.phase);
+      var a = p.alpha*flicker;
+      ctx.beginPath(); ctx.arc(px,py,p.radius,0,Math.PI*2);
+      ctx.fillStyle = 'rgba(180,210,255,'+a+')';
+      ctx.fill();
+    }
+    // 黑洞
+    _nebulaDrawBlackHole(ctx, _nebulaBlackHole, _nebulaTime);
+    // 星星
+    for (var i = 0; i < _nebulaStars.length; i++) {
+      var s = _nebulaStars[i];
+      var fl = 0.2+0.8*Math.sin(_nebulaTime*0.02*s.speed+s.phase);
+      var br = s.brightness*fl*gB;
+      _nebulaDrawStar(ctx, s.x, s.y, s.radius, br, s.hue, s.sat, s.light, 1.0);
+    }
+    // 流星
+    for (var i = 0; i < _nebulaMeteors.length; i++) {
+      var m = _nebulaMeteors[i];
+      if (m.active) {
+        _nebulaDrawMeteor(ctx, m);
+        m.life++;
+        if (m.life > m.maxLife) {
+          m.active = false;
+          (function(mm){
+            setTimeout(function(){
+              var nm = _nebulaCreateMeteor();
+              mm.x=nm.x; mm.y=nm.y; mm.vx=nm.vx; mm.vy=nm.vy;
+              mm.life=0; mm.maxLife=nm.maxLife; mm.active=true; mm.length=nm.length;
+            }, 1200+Math.random()*2500);
+          })(m);
+        }
+      }
+    }
+
+    _nebulaRAF = requestAnimationFrame(_nebulaFrame);
+  }
+
+  // 暴露启动/停止接口
+  window.startNebulaAnimation = function() {
+    _nebulaInit();
+    _nebulaTime = 0;
+    if (_nebulaRAF) cancelAnimationFrame(_nebulaRAF);
+    _nebulaFrame();
+  };
+  window.stopNebulaAnimation = function() {
+    if (_nebulaRAF) { cancelAnimationFrame(_nebulaRAF); _nebulaRAF = null; }
+  };
+
+  // 窗口自适应
+  window.addEventListener('resize', function() {
+    if (_nebulaRAF && _nebulaCanvas) {
+      _nebulaCanvas.width = window.innerWidth;
+      _nebulaCanvas.height = window.innerHeight;
+      _nebulaInit();
+    }
+  });
+})();
+</script>
+
+<div class="modal" id="ctxModal"><div class="modal-box" style="width:680px;max-height:88vh"><span class="close" onclick="closeContextDebug()">&times;</span><h2>🧠 AI 上下文调试</h2>
+<div class="ctx-grid" id="ctx_content"><div style="color:var(--dim);text-align:center;padding:20px">加载中...</div></div>
+</div></div>
+
+<div class="modal" id="viewHistoryModal"><div class="modal-box" style="width:800px;max-height:92vh;overflow-y:auto"><span class="close" onclick="closeViewHistory()">&times;</span><h2>📖 已有世界</h2>
+<div id="history_world_list" style="margin-bottom:18px"></div>
+<div id="history_content" style="max-height:65vh;overflow-y:auto;line-height:1.9;font-size:.95em;color:var(--text)"><div style="color:var(--dim);text-align:center;padding:30px">选择一个存档查看内容</div></div>
+</div></div>
+
+<div class="modal" id="worldPanelModal"><div class="modal-box" style="width:960px;max-width:95vw;height:88vh;display:flex;flex-direction:column"><span class="close" onclick="closeWorldPanel()">&times;</span>
+<h2 style="margin-bottom:10px">🌍 世界面板</h2>
+<div style="display:flex;gap:8px;margin-bottom:14px;flex-shrink:0;flex-wrap:wrap">
+<div class="wp-tab active" onclick="switchWorldTab('map')" id="wp_tab_map">🗺️ 地图</div>
+<div class="wp-tab" onclick="switchWorldTab('graph')" id="wp_tab_graph">🔗 关系</div>
+<div class="wp-tab" onclick="switchWorldTab('timeline')" id="wp_tab_timeline">📅 时间线</div>
+<div class="wp-tab" onclick="switchWorldTab('events')" id="wp_tab_events">📰 事件</div>
+</div>
+<div style="flex:1;overflow:hidden;position:relative">
+<div id="wp_map" class="wp-panel active" style="width:100%;height:100%"><div id="wpMapCanvas" style="width:100%;height:100%;background:var(--bg-deep);border-radius:10px"></div></div>
+<div id="wp_graph" class="wp-panel" style="width:100%;height:100%"><div id="wpGraphCanvas" style="width:100%;height:100%;background:var(--bg-deep);border-radius:10px"></div></div>
+<div id="wp_timeline" class="wp-panel" style="width:100%;height:100%;overflow-y:auto;padding:18px"><div id="wpTimelineContent" style="color:var(--dim);text-align:center;padding:40px">加载时间线...</div></div>
+<div id="wp_events" class="wp-panel" style="width:100%;height:100%;overflow-y:auto;padding:18px"><div id="wpEventsContent" style="color:var(--dim);text-align:center;padding:40px">加载事件...</div></div>
+</div>
+<div style="flex-shrink:0;padding:10px 0;font-size:.8em;color:var(--dim);border-top:1px solid var(--border);display:flex;justify-content:space-between">
+<span id="wp_info_left"></span>
+<span id="wp_info_right"></span>
+</div>
+</div></div>
+
+<div class="modal" id="v10PanelModal"><div class="modal-box" style="width:900px;max-width:95vw;max-height:88vh;display:flex;flex-direction:column"><span class="close" onclick="closeV10Panel()">&times;</span>
+<h2 style="margin-bottom:10px">🔮 太虚幻境高级功能面板</h2>
+<div style="display:flex;gap:8px;margin-bottom:14px;flex-shrink:0;flex-wrap:wrap">
+<div class="wp-tab active" onclick="switchV10Tab('foreshadow')" id="v10_tab_foreshadow">🧵 伏笔</div>
+<div class="wp-tab" onclick="switchV10Tab('tasks')" id="v10_tab_tasks">📋 任务板</div>
+<div class="wp-tab" onclick="switchV10Tab('audit')" id="v10_tab_audit">🔍 审计</div>
+<div class="wp-tab" onclick="switchV10Tab('memory')" id="v10_tab_memory">🧠 记忆</div>
+<div class="wp-tab" onclick="switchV10Tab('stats')" id="v10_tab_stats">📊 性能</div>
+</div>
+<div style="flex:1;overflow-y:auto;position:relative">
+<div id="v10_foreshadow" class="wp-panel active" style="width:100%;min-height:100%;padding:14px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+    <div id="v10_fs_stats" style="font-size:.88em;color:var(--dim)"></div>
+    <div>
+      <button class="btn" style="font-size:.8em;padding:6px 16px;width:auto" onclick="switchForeshadowMode()">切换提醒模式</button>
+    </div>
+  </div>
+  <div id="v10_fs_list" style="font-size:.88em"><div style="color:var(--dim);text-align:center;padding:20px">加载中...</div></div>
+</div>
+<div id="v10_tasks" class="wp-panel" style="width:100%;min-height:100%;padding:14px">
+  <div id="v10_tb_stats" style="font-size:.88em;color:var(--dim);margin-bottom:14px"></div>
+  <div id="v10_tb_list" style="font-size:.88em"><div style="color:var(--dim);text-align:center;padding:20px">加载中...</div></div>
+</div>
+<div id="v10_audit" class="wp-panel" style="width:100%;min-height:100%;padding:14px">
+  <div id="v10_audit_stats" style="font-size:.88em;color:var(--dim);margin-bottom:14px"></div>
+  <div id="v10_audit_list" style="font-size:.88em"><div style="color:var(--dim);text-align:center;padding:20px">加载中...</div></div>
+</div>
+<div id="v10_memory" class="wp-panel" style="width:100%;min-height:100%;padding:14px">
+  <div id="v10_mem_stats" style="font-size:.88em;color:var(--dim);margin-bottom:14px"></div>
+  <div id="v10_mem_list" style="font-size:.88em"><div style="color:var(--dim);text-align:center;padding:20px">加载中...</div></div>
+</div>
+<div id="v10_stats" class="wp-panel" style="width:100%;min-height:100%;padding:14px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+    <div id="v10_stats_summary" style="font-size:.88em;color:var(--dim)"></div>
+    <button class="btn" style="font-size:.8em;padding:6px 16px;width:auto" onclick="loadV10Stats()">🔄 刷新</button>
+  </div>
+  <div id="v10_stats_list" style="font-size:.88em"><div style="color:var(--dim);text-align:center;padding:20px">加载中...</div></div>
+</div>
+</div>
+</div></div>
+
+<script src="/js/dom.js?v=3"></script>
+<script src="/js/core.js?v=3"></script>
+<script src="/js/bg-manager.js?v=1"></script>
+<script src="/js/ui.js?v=8"></script>
+<script src="/js/game.js?v=10"></script>
+<script src="/js/config-shared.js?v=3"></script>
+<script src="/js/settings.js?v=7"></script>
+<script src="/js/v10_panel.js?v=3"></script>
+<script src="/js/npc_prediction.js?v=1"></script>
+<!-- alpine-components.js moved to <head> before alpine.js CDN (see fix note) -->
+
+<div class="modal" id="npcPredictionModal"><div class="modal-box" style="width:850px;max-width:95vw;max-height:88vh;display:flex;flex-direction:column"><span class="close" onclick="closeNpcPrediction()">&times;</span>
+<h2 style="margin-bottom:10px">🧠 NPC行动智能推演</h2>
+<div style="display:flex;gap:12px;margin-bottom:14px;flex-shrink:0;flex-wrap:wrap;align-items:end">
+<div class="fg" style="margin:0"><label>推演来源</label><select id="pred_source_mode"><option value="auto">自动判断</option><option value="novel">小说文本</option><option value="game">游戏世界</option></select></div>
+<div class="fg" style="margin:0"><label>最大NPC数</label><input id="pred_max_npcs" type="number" value="50" min="1" max="200" style="width:80px"></div>
+<button class="btn" id="pred_start_btn" onclick="startNpcPrediction()" style="padding:8px 20px;width:auto">开始推演</button>
+</div>
+<div id="pred_progress" style="display:none;margin-bottom:14px">
+<div style="background:rgba(201,169,110,.15);border-radius:4px;height:6px;margin-bottom:6px">
+<div id="pred_progress_bar" style="background:var(--gold);height:100%;border-radius:4px;transition:width .3s;width:0%"></div>
+</div>
+<div id="pred_progress_text" style="font-size:.85em;color:var(--dim)"></div>
+</div>
+<div id="pred_report_content" style="flex:1;overflow-y:auto;font-size:.9em">
+<div style="color:var(--dim);text-align:center;padding:20px">暂无推演报告，请先执行推演</div>
+</div>
+</div></div>
+</body>
+</html>
