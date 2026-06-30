@@ -2,7 +2,9 @@
 
 const API_BASE = '';
 
-async function initAccessToken() {
+// [v12] 确保 Token 已准备好再继续
+async function ensureToken() {
+  if (window.ACCESS_TOKEN) return;
   try {
     var resp = await fetch(API_BASE + '/api/access-token');
     if (resp.ok) {
@@ -16,7 +18,8 @@ async function initAccessToken() {
   }
 }
 
-document.addEventListener('DOMContentLoaded', initAccessToken);
+// 页面加载时尝试获取 Token（非阻塞）
+ensureToken();
 
 // [v10] 统一的 HTML 转义工具（所有文件共用，避免多套实现不一致 — L10c）
 function escHtml(str) {

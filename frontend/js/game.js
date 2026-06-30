@@ -2032,6 +2032,9 @@ async function handleCardImport(input) {
 
   $('cardImportInfo').textContent = '正在导入...';
 
+  // [v12] 确保 Token 已准备好
+  await ensureToken();
+
   try {
     var formData = new FormData();
     formData.append('file', file);
