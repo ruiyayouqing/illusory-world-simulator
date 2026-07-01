@@ -176,9 +176,11 @@ body {
     box-shadow: 0 0 0 3px var(--panel-border);
     background: var(--panel-light);
 }
-.fg input::placeholder, .fg textarea::placeholder {
-    color: rgba(255,255,255,0.5);
+.fg input::placeholder, .fg textarea::placeholder,
+.modal-box input::placeholder, .modal-box textarea::placeholder {
+    color: var(--dim) !important;
     font-style: italic;
+    opacity: 1 !important;
 }
 .btn {
     width: 100%;

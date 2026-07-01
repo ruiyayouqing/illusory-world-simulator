@@ -48,6 +48,7 @@ class MemoryCurator:
         self._archived_memories: list[dict] = []  # 归档区
         self._history_summaries: list[dict] = []  # 历史摘要
         self._summary_counter = 0
+        self._summarized_up_to = 0  # 已摘要到第几条（用于 generate_summary_only）
 
     def should_curate(self, current_turn: int) -> bool:
         """判断是否应该触发整理"""
@@ -98,6 +99,44 @@ class MemoryCurator:
             "remaining": remaining,
             "replacement": [summary_entry]
         }
+
+    def generate_summary_only(self, narrative_history: list, current_turn: int, current_day: int) -> dict:
+        """
+        仅生成摘要存入 _history_summaries，不修改原始 narrative_history。
+        用于保留完整对话历史的同时，为 LLM 上下文生成压缩摘要。
+        """
+        # 检查是否有足够新条目可摘要
+        remaining = len(narrative_history) - self._summarized_up_to
+        if remaining < self.summary_interval + 5:
+            return {"status": "skipped", "reason": "not enough new entries"}
+
+        self._last_summary_turn = current_turn
+        self._summary_counter += 1
+
+        to_summarize = narrative_history[self._summarized_up_to:self._summarized_up_to + self.summary_interval]
+
+        summary_text = self._generate_summary(to_summarize, self._summary_counter)
+
+        summary_entry = {
+            "type": "summary",
+            "summary_id": f"summary_{self._summary_counter}",
+            "day_range": [to_summarize[0].get("day", 0) if to_summarize else 0,
+                         to_summarize[-1].get("day", current_day) if to_summarize else current_day],
+            "turn_range": [to_summarize[0].get("turn", 0) if to_summarize else 0,
+                         to_summarize[-1].get("turn", current_turn) if to_summarize else current_turn],
+            "text": summary_text,
+            "entry_count": len(to_summarize),
+            "key_npcs": self._extract_key_entities(to_summarize),
+            "key_events": self._extract_key_events(to_summarize),
+        }
+
+        self._history_summaries.append(summary_entry)
+        self._summarized_up_to += len(to_summarize)
+
+        logger.info("History summary-only #%d created: entries %d-%d summarized (original preserved)",
+                     self._summary_counter, self._summarized_up_to - len(to_summarize), self._summarized_up_to - 1)
+
+        return {"status": "success", "summary": summary_entry}
 
     def _generate_summary(self, entries: list, summary_num: int) -> str:
         """使用LLM生成摘要"""
@@ -449,7 +488,7 @@ class MemoryCurator:
 最多5个模式。只输出JSON。"""
 
         try:
-            result = self.llm.chat_json(prompt, temperature=0.3, max_tokens=512)
+            result = self.llm.chat_json(prompt, temperature=0.3, max_tokens=2048)
             patterns = result.get("patterns", [])
         except Exception as e:
             logger.debug("Pattern extraction failed: %s", e)

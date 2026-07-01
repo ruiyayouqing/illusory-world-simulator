@@ -187,6 +187,11 @@ async def update_npc(npc_id: str, req: UpdateNpcRequest):
             npc.record_relation_change(new_rel, "玩家修改", engine.world_state.current_day if engine.world_state else 1)
         npc.relation_to_player.relation_type = new_rel
         npc.relation_to_player.favor = new_fav
+        # [Bug] 同步到 npc_registry，否则 who-is-who 面板仍显示旧关系
+        if engine.npc_registry and npc_id in engine.npc_registry.world_npcs:
+            engine.npc_registry.world_npcs[npc_id].relation_to_player = {
+                "favor": new_fav, "relation_type": new_rel
+            }
     if "tags" in update_data:
         npc.tags = update_data["tags"]
     if "mbti_type" in update_data:

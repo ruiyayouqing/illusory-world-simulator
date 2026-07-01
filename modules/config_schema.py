@@ -33,7 +33,7 @@ class GameConfig(BaseModel):
     auto_save: bool = True
     max_short_term_memory: int = Field(default=20, ge=5, le=100)
     npc_offline_evolution: bool = True
-    narrative_style: str = "半古半文"
+    narrative_style: str = "网文爽文"
     narrative_style_custom: str = ""
     max_context: int = Field(default=16384, ge=2048, le=32768)
     economy_enabled: bool = False

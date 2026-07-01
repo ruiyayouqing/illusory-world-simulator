@@ -55,9 +55,9 @@ logger = logging.getLogger("chronoverse")
 
 
 class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMixin):
-    # [v9] 叙事历史上限，防止内存无限增长
+    # [v10] 叙事历史上限 — 仅触发摘要生成，不再替换/截断原始记录
     MAX_NARRATIVE_HISTORY = 500
-    NARRATIVE_HISTORY_KEEP = 200
+    NARRATIVE_HISTORY_KEEP = 500
 
     def __init__(self, save_dir: str = "./saves"):
         self.save_manager = SaveManager(save_dir)
@@ -1208,6 +1208,16 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                     favor=npc_favor, relation_type=npc_rel_type
                 )
                 logger.info("Initialized relation %s: favor=%d, type=%s", npc_name, npc_favor, npc_rel_type)
+        # [Bug] 将 npc_states 的关系同步到 npc_registry.world_npcs，
+        # 否则 who-is-who 面板始终显示 world_def 里的初始关系（陌生人）
+        if self.npc_registry:
+            for npc_id, npc in self.npc_states.items():
+                if npc_id in self.npc_registry.world_npcs:
+                    rtp = npc.relation_to_player
+                    if hasattr(rtp, 'favor'):
+                        self.npc_registry.world_npcs[npc_id].relation_to_player = {
+                            "favor": rtp.favor, "relation_type": getattr(rtp, 'relation_type', '陌生人')
+                        }
 
     def _extract_relations_from_narrative(self, narrative: str, world_data: dict):
         if not self.llm or not self.npc_states or not self.player_state:
@@ -1721,10 +1731,13 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
 
     def generate_scene_image(self, narrative: str) -> dict:
         if self.visual_engine and self.player_state:
+            day = self.world_state.current_day if self.world_state else 0
+            time_str = self.world_state.current_time if self.world_state else ""
             return self.visual_engine.generate_scene_image(
                 narrative, self.player_state,
                 self.player_state.location,
-                self.world_state.weather if self.world_state else "晴朗"
+                self.world_state.weather if self.world_state else "晴朗",
+                day=day, time_str=time_str
             )
         return {"generated": False}
 
@@ -1899,6 +1912,7 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             # [v10.1] 持久化 Curator 历史摘要，避免重启后丢失
             "_history_summaries": self.memory_curator._history_summaries if self.memory_curator else [],
             "_summary_counter": self.memory_curator._summary_counter if self.memory_curator else 0,
+            "_summarized_up_to": self.memory_curator._summarized_up_to if self.memory_curator else 0,
         }
 
         atomic_write_json(
@@ -2023,6 +2037,7 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         if self.memory_curator:
             self.memory_curator._history_summaries = gs.get("_history_summaries", [])
             self.memory_curator._summary_counter = gs.get("_summary_counter", 0)
+            self.memory_curator._summarized_up_to = gs.get("_summarized_up_to", 0)
         logger.info("Loaded game_state: narrative_history=%d entries, summaries=%d",
                      len(self.narrative_history),
                      len(gs.get("_history_summaries", [])))

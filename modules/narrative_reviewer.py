@@ -204,7 +204,7 @@ class NarrativeReviewer:
 只输出JSON。"""
 
         try:
-            result = self.llm.chat_json(prompt, temperature=0.3, max_tokens=1024)
+            result = self.llm.chat_json(prompt, temperature=0.3, max_tokens=2048)
         except Exception as e:
             logger.warning("Narrative review LLM failed: %s", e)
             return {"reviewed": False, "reason": "llm_error", "error": str(e)}

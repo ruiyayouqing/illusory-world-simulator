@@ -77,7 +77,7 @@ var THEMES = {
                text_bright:'#f0e0e0', panel_light:'#2a1818', panel_border:'rgba(201,122,110,0.25)', bg_deep:'#0a0606', gold_light:'#e09a8e', gold_dark:'#8a4a3e' },
   forest:    { name:'暗林',   bg:'#0a0f0a', panel:'#111a11', text:'#c8d9c8', dim:'#6b8a6b', gold:'#8ab56e', border:'#1a2a1a', player:'#9ab57a', ai:'#c8d9c8',
                text_bright:'#e0f0e0', panel_light:'#1a2a1a', panel_border:'rgba(138,181,110,0.25)', bg_deep:'#060a06', gold_light:'#a0d08e', gold_dark:'#5a8a4e' },
-  parchment: { name:'羊皮纸', bg:'#f5efe6', panel:'#ede4d5', text:'#3a3228', dim:'#8a7a6a', gold:'#8b6914', border:'#d4c4a8', player:'#4a7a9a', ai:'#3a3228',
+  parchment: { name:'羊皮纸', bg:'#f5efe6', panel:'#ede4d5', text:'#3a3228', dim:'#6a5a48', gold:'#8b6914', border:'#d4c4a8', player:'#4a7a9a', ai:'#3a3228',
                text_bright:'#1a1410', panel_light:'#f5efe6', panel_border:'rgba(139,105,20,0.3)', bg_deep:'#e8dfd0', gold_light:'#b8901c', gold_dark:'#6b4f0e' },
   sakura:    { name:'樱花',   bg:'#faf0f2', panel:'#f5e6e9', text:'#4a3540', dim:'#a08090', gold:'#c97a8a', border:'#e8d0d8', player:'#6a8a9a', ai:'#4a3540',
                text_bright:'#2a1520', panel_light:'#faf0f2', panel_border:'rgba(201,122,138,0.3)', bg_deep:'#f0e0e4', gold_light:'#e09aa8', gold_dark:'#a05a6a' },
@@ -161,7 +161,7 @@ async function loadSettings() {
     // [P3-8] 使用共享模块填充 DOM
     fillDOMFromConfig(c);
     // 叙事风格（非通用字段，仍在此处理）
-    var ns = c.game?.narrative_style || '章回体';
+    var ns = c.game?.narrative_style || '网文爽文';
     var sel = $('st_narrative_style');
     if (ns === '自定义') {
       sel.value = '自定义';
@@ -172,7 +172,7 @@ async function loadSettings() {
       $('custom_style_section').style.display = 'none';
     }
     // [Bug] 叙事视角
-    $('st_narrative_perspective').value = c.game?.narrative_perspective || 'second';
+    $('st_narrative_perspective').value = c.game?.narrative_perspective || 'third';
     // 叙事字数滑块
     var nmc = c.game?.narrative_max_chars || 1000;
     var slider = $('st_narrative_chars_slider');
@@ -258,7 +258,7 @@ function loadV10Settings(c) {
   var maEl = $('st_v10_multiagent_enabled');
   if (maEl) maEl.checked = ma.enabled !== false;
   var maSense = $('st_v10_multiagent_sensitivity');
-  if (maSense) maSense.value = ma.sensitivity || 'normal';
+  if (maSense) maSense.value = ma.sensitivity || 'low';
 }
 
 var _llmProfiles = {};
@@ -486,7 +486,7 @@ function collectV10Settings() {
       max_archived_memories: parseInt(($('st_v10_curator_max') || {value: '200'}).value) || 200
     },
     butterfly_approval_gate: {
-      enabled: ($('st_v10_butterfly_enabled') || {checked: false}).checked,
+      enabled: ($('st_v10_butterfly_enabled') || {checked: true}).checked,
       approval_threshold: parseFloat(($('st_v10_butterfly_threshold') || {value: '7.0'}).value) || 7.0
     },
     layered_memory: {
@@ -505,7 +505,7 @@ function collectV10Settings() {
     },
     multi_agent_narrative: {
       enabled: ($('st_v10_multiagent_enabled') || {checked: true}).checked,
-      sensitivity: ($('st_v10_multiagent_sensitivity') || {value: 'normal'}).value || 'normal',
+      sensitivity: ($('st_v10_multiagent_sensitivity') || {value: 'low'}).value || 'low',
       max_revisions: 1
     }
   };

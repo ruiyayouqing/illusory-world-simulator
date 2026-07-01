@@ -1195,7 +1195,7 @@ class PlayerAgent(BaseAgent):
 
         try:
             # 使用 TASK_SIMPLE 路由到 cheap LLM
-            result = self.llm.chat_json(prompt, temperature=0.2, max_tokens=512,
+            result = self.llm.chat_json(prompt, temperature=0.2, max_tokens=2048,
                                         task_type=TASK_SIMPLE)
             if isinstance(result, dict) and "error" not in result:
                 self._llm_expansion_cache[cache_key] = (_time.time(), result)

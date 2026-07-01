@@ -457,21 +457,15 @@ class TurnProcessor:
                 "text": world_event.get("narrative", ""),
                 "event_type": world_event.get("event_type", ""),
             })
-        # [v10.1] 实时检查叙事历史长度，超过阈值立即触发压缩
+        # [v10.1] 实时检查叙事历史长度，超过阈值生成摘要（不替换原始记录）
         if len(eng.narrative_history) > eng.MAX_NARRATIVE_HISTORY and eng.memory_curator:
             try:
-                summary_result = eng.memory_curator.summarize_history(
+                eng.memory_curator.generate_summary_only(
                     eng.narrative_history,
                     current_turn=eng.meta.turn_count if eng.meta else 0,
                     current_day=eng.world_state.current_day if eng.world_state else 1,
                 )
-                if summary_result.get("status") == "success":
-                    eng.narrative_history = (
-                        summary_result.get("replacement", [])
-                        + summary_result.get("remaining", [])
-                    )
-                    eng._narrative_compressed = True
-                    logger.info("Real-time narrative compression triggered: %d entries",
-                                len(eng.narrative_history))
+                logger.info("Summary generated (history preserved): %d entries",
+                            len(eng.narrative_history))
             except Exception as e:
-                logger.warning("Real-time narrative compression failed: %s", e)
+                logger.warning("Summary generation failed: %s", e)

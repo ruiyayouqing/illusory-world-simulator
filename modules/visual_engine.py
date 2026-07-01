@@ -161,7 +161,8 @@ class VisualEngine:
 
     def generate_scene_image(self, narrative: str, player: PlayerState,
                              location: str, weather: str,
-                             world_type: str = "custom") -> dict:
+                             world_type: str = "custom",
+                             day: int = 0, time_str: str = "") -> dict:
         if not self.should_generate_image(narrative):
             return {"generated": False, "reason": "场景不触发生成"}
 
@@ -173,6 +174,8 @@ class VisualEngine:
         if result.get("generated"):
             result["location"] = location
             result["weather"] = weather
+            result["day"] = day
+            result["time"] = time_str
             self.image_history.append(result)
             # [Bug] 限制 image_history 长度，防止无限增长导致存档膨胀
             if len(self.image_history) > 50:

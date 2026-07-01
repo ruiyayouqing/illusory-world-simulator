@@ -251,6 +251,12 @@ async function loadSlotGame(wid, slotId) {
     const opts = (slotRes.initial_options && slotRes.initial_options.length) ? slotRes.initial_options : (d.initial_options || []);
     if (opts.length) showOpts(opts);
     updateStatus();
+    if (!d.images || d.images.length === 0) {
+      var worldDesc = (GS.world?.description || '') + ' ' + (GS.world?.name || '');
+      if (worldDesc.trim()) {
+        autoGenerateWorldImage(worldDesc, '');
+      }
+    }
   } catch(e) {
     alert('加载失败');
   } finally {
@@ -354,6 +360,9 @@ async function createWorld() {
     if (d.initial_event) addNarrative(d.initial_event, false, false);
     if (d.initial_options && d.initial_options.length) showOpts(d.initial_options);
     updateStatus();
+    if (d.world_intro || d.initial_event) {
+      autoGenerateWorldImage(d.world_intro || '', d.initial_event || '');
+    }
   } catch(e) {
     alert('失败:' + e.message);
   } finally {
@@ -382,6 +391,12 @@ async function loadGame(wid) {
     restoreHistory(d.history || [], d.images || []);
     if (d.initial_options && d.initial_options.length) showOpts(d.initial_options);
     updateStatus();
+    if (!d.images || d.images.length === 0) {
+      var worldDesc = (GS.world?.description || '') + ' ' + (GS.world?.name || '');
+      if (worldDesc.trim()) {
+        autoGenerateWorldImage(worldDesc, '');
+      }
+    }
   } catch(e) {
     alert('加载失败');
   } finally {
@@ -502,8 +517,7 @@ function handleSlashCommand(cmd) {
 
 var actionCount = 0;
 var lastImageAction = 0;
-// [v11] 输出汇总：存储每次AI返回的原始输出
-var outputLog = [];
+// [v11] 输出汇总：存储每次AI返回的原始输出（声明在 ui.js 中）
 
 function openOutputLog() {
   try {
@@ -1127,6 +1141,28 @@ async function doImage() {
     }
   } catch(e) {
     addSystem('生成失败');
+  }
+}
+
+async function autoGenerateWorldImage(worldIntro, initialEvent) {
+  var prompt = (worldIntro + ' ' + initialEvent).substring(0, 400);
+  if (!prompt.trim()) return;
+  addSystem('正在生成世界场景图...');
+  try {
+    var d = await api('POST', '/api/generate-image', {prompt_override: prompt});
+    if (d.image && d.image.generated) {
+      var nb = $('nb');
+      var img = document.createElement('img');
+      img.src = d.image.image_url + '?t=' + Date.now();
+      img.className = 'inline-img';
+      nb.appendChild(img);
+      nb.scrollTop = nb.scrollHeight;
+      addSystem('场景图已生成');
+    } else {
+      addSystem('场景图生成失败: ' + (d.image ? d.image.error : '未知'));
+    }
+  } catch(e) {
+    addSystem('场景图生成失败');
   }
 }
 

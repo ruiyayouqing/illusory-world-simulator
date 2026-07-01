@@ -46,7 +46,7 @@ document.addEventListener('alpine:init', () => {
       ui: { theme: 'obsidian', font_size: 'medium', strip_gray_narrative: true },
       npc_info_visibility: 'immersive',
       fixed_prompt: { content: '', enabled: true },
-      game: { narrative_style: '章回体', economy_enabled: false }
+      game: { narrative_style: '章回体', narrative_perspective: 'second', economy_enabled: false }
     },
     llmProfiles: [],
     imageProfiles: [],
@@ -107,7 +107,8 @@ document.addEventListener('alpine:init', () => {
       try {
         const styleName = this.config.game?.narrative_style
         const customText = styleName === '自定义' ? (this.$refs.customStyle?.value || '') : ''
-        await api('POST', '/api/narrative-style', { style_name: styleName, custom_text: customText })
+        const narrativePerspective = this.config.game?.narrative_perspective || 'second'
+        await api('POST', '/api/narrative-style', { style_name: styleName, custom_text: customText, narrative_perspective: narrativePerspective })
 
         // [P3-8] 使用共享模块构建请求体
         const body = buildFullSettingsBody(this.config)

@@ -12,7 +12,7 @@
 <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
 <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
 <title>太虚幻境 - 虚拟世界人生模拟器</title>
-<link rel="stylesheet" href="/css/style.css?v=9">
+<link rel="stylesheet" href="/css/style.css?v=10">
 <style>
 .toast-success { background: linear-gradient(135deg, rgba(46,125,50,0.95), rgba(56,142,60,0.95)); color: white; }
 .toast-error { background: linear-gradient(135deg, rgba(198,40,40,0.95), rgba(211,47,47,0.95)); color: white; }
@@ -232,7 +232,7 @@
   <div class="settings-section">
     <div class="settings-section-title">🧠 主力模型</div>
     <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
-      <select id="st_llm_profile" onchange="applyProfile('llm')" style="flex:1;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"></select>
+      <select id="st_llm_profile" onchange="applyProfile('llm')" style="flex:1;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"></select>
       <button onclick="deleteProfile('llm')" style="padding:8px 12px;background:#5a2a2a;border:1px solid #9a5a5a;border-radius:8px;color:#c96e6e;font-size:.82em;cursor:pointer">删除</button>
     </div>
     <div class="fg"><label>API Key</label><input type="password" id="st_lk" x-model="config.llm.api_key" placeholder="API Key"></div>
@@ -246,7 +246,7 @@
     <div style="font-size:.75em;color:var(--dim);margin-top:4px">推理模型的思考过程会消耗此预算。不限制时由API默认值决定（通常16K-32K）。</div>
     </div>
     <div style="display:flex;gap:8px;margin-top:8px">
-      <input type="text" id="st_llm_pname" placeholder="配置名称" style="flex:1;padding:8px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
+      <input type="text" id="st_llm_pname" placeholder="配置名称" style="flex:1;padding:8px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
       <button onclick="saveProfile('llm')" style="padding:8px 16px;background:var(--gold);border:none;border-radius:8px;color:#0d0c0f;font-weight:700;font-size:.85em;cursor:pointer">存为配置</button>
     </div>
   </div>
@@ -258,14 +258,14 @@
       <label style="font-size:.88em;color:var(--dim)"><input type="checkbox" id="st_cheap_enabled" x-model="config.cheap_llm.enabled"> 启用备用模型（简单任务用此模型，省钱更快）</label>
     </div>
     <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
-      <select id="st_cheap_profile" onchange="applyProfile('cheap')" style="flex:1;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"></select>
+      <select id="st_cheap_profile" onchange="applyProfile('cheap')" style="flex:1;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"></select>
       <button onclick="deleteProfile('cheap')" style="padding:8px 12px;background:#5a2a2a;border:1px solid #9a5a5a;border-radius:8px;color:#c96e6e;font-size:.82em;cursor:pointer">删除</button>
     </div>
     <div class="fg"><label>API Key</label><input type="password" id="st_cheap_lk" x-model="config.cheap_llm.api_key" placeholder="留空则不启用"></div>
     <div class="fg"><label>Base URL</label><input type="text" id="st_cheap_lb" x-model="config.cheap_llm.base_url" placeholder="https://api.deepseek.com/v1"></div>
     <div class="fg"><label>模型名称</label><input type="text" id="st_cheap_lm" x-model="config.cheap_llm.model_name" placeholder="如 deepseek-chat"></div>
     <div style="display:flex;gap:8px;margin-top:8px">
-      <input type="text" id="st_cheap_pname" placeholder="配置名称" style="flex:1;padding:8px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
+      <input type="text" id="st_cheap_pname" placeholder="配置名称" style="flex:1;padding:8px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
       <button onclick="saveProfile('cheap')" style="padding:8px 16px;background:var(--gold);border:none;border-radius:8px;color:#0d0c0f;font-weight:700;font-size:.85em;cursor:pointer">存为配置</button>
     </div>
     <div style="font-size:.78em;color:var(--dim);margin-top:8px;padding:8px 10px;background:rgba(212,175,55,.05);border-radius:6px">💡 简单任务（分类/评分）优先用廉价模型；主模型失败时自动降级</div>
@@ -278,14 +278,14 @@
       <label style="font-size:.88em;color:var(--dim)"><input type="checkbox" id="st_dlg_enabled" x-model="config.dialogue_llm.enabled"> 启用对话模型（游戏内叙事/NPC对话/选项生成走此模型）</label>
     </div>
     <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
-      <select id="st_dlg_profile" onchange="applyProfile('dialogue')" style="flex:1;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"></select>
+      <select id="st_dlg_profile" onchange="applyProfile('dialogue')" style="flex:1;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"></select>
       <button onclick="deleteProfile('dialogue')" style="padding:8px 12px;background:#5a2a2a;border:1px solid #9a5a5a;border-radius:8px;color:#c96e6e;font-size:.82em;cursor:pointer">删除</button>
     </div>
     <div class="fg"><label>API Key</label><input type="password" id="st_dlg_lk" x-model="config.dialogue_llm.api_key" placeholder="留空则回退到主力模型"></div>
     <div class="fg"><label>Base URL</label><input type="text" id="st_dlg_lb" x-model="config.dialogue_llm.base_url" placeholder="https://api.deepseek.com/v1"></div>
     <div class="fg"><label>模型名称</label><input type="text" id="st_dlg_lm" x-model="config.dialogue_llm.model_name" placeholder="如 deepseek-chat"></div>
     <div style="display:flex;gap:8px;margin-top:8px">
-      <input type="text" id="st_dlg_pname" placeholder="配置名称" style="flex:1;padding:8px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
+      <input type="text" id="st_dlg_pname" placeholder="配置名称" style="flex:1;padding:8px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
       <button onclick="saveProfile('dialogue')" style="padding:8px 16px;background:var(--gold);border:none;border-radius:8px;color:#0d0c0f;font-weight:700;font-size:.85em;cursor:pointer">存为配置</button>
     </div>
   </div>
@@ -295,14 +295,14 @@
   <div class="settings-section">
     <div class="settings-section-title">🎨 文生图</div>
     <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
-      <select id="st_img_profile" onchange="applyProfile('image')" style="flex:1;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"></select>
+      <select id="st_img_profile" onchange="applyProfile('image')" style="flex:1;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"></select>
       <button onclick="deleteProfile('image')" style="padding:8px 12px;background:#5a2a2a;border:1px solid #9a5a5a;border-radius:8px;color:#c96e6e;font-size:.82em;cursor:pointer">删除</button>
     </div>
     <div class="fg"><label>API Key</label><input type="password" id="st_ik" x-model="config.image.api_key" placeholder="API Key"></div>
     <div class="fg"><label>调用地址</label><input type="text" id="st_iu" x-model="config.image.base_url" placeholder="https://xxx/v1/images/generations"></div>
     <div class="fg"><label>模型</label><input type="text" id="st_im" x-model="config.image.model_name"></div>
     <div style="display:flex;gap:8px;margin-top:8px">
-      <input type="text" id="st_img_pname" placeholder="配置名称" style="flex:1;padding:8px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
+      <input type="text" id="st_img_pname" placeholder="配置名称" style="flex:1;padding:8px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
       <button onclick="saveProfile('image')" style="padding:8px 16px;background:var(--gold);border:none;border-radius:8px;color:#0d0c0f;font-weight:700;font-size:.85em;cursor:pointer">存为配置</button>
     </div>
   </div>
@@ -323,7 +323,7 @@
   <div class="settings-section">
     <div class="settings-section-title">写作风格</div>
     <div class="fg">
-      <select id="st_narrative_style" onchange="onStyleChange()" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
+      <select id="st_narrative_style" onchange="onStyleChange()" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
         <option value="章回体">章回体 — 半文半白，《三言二拍》风格</option>
         <option value="半古半文">半古半文 — 文言句式+白话叙事</option>
         <option value="大白话">大白话 — 现代口语，轻松幽默</option>
@@ -335,7 +335,7 @@
     </div>
     <div id="custom_style_section" style="margin-bottom:12px;display:none">
       <div class="fg"><label>自定义风格描述</label>
-        <textarea id="st_custom_style" rows="4" placeholder="描述你想要的写作风格，例如：使用短句为主，节奏明快；对话丰富，注重人物语言描写" style="width:100%;padding:10px 12px;background:rgba(0,0,0,.3);border:1px solid var(--gold);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea>
+        <textarea id="st_custom_style" rows="4" placeholder="描述你想要的写作风格，例如：使用短句为主，节奏明快；对话丰富，注重人物语言描写" style="width:100%;padding:10px 12px;background:var(--panel-light);border:1px solid var(--gold);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea>
       </div>
       <div style="display:flex;gap:8px">
         <button onclick="uploadStyleFile()" class="upload-btn">📎 上传风格文件(.txt)</button>
@@ -350,7 +350,7 @@
   <div class="settings-section">
     <div class="settings-section-title">叙事视角</div>
     <div class="fg">
-      <select id="st_narrative_perspective" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
+      <select id="st_narrative_perspective" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
         <option value="second">第二人称 — "你"（沉浸感强，推荐）</option>
         <option value="third">第三人称 — 角色名（如"张立"、"凌云"）</option>
         <option value="first">第一人称 — "我"（内心独白感）</option>
@@ -397,7 +397,7 @@
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
       <label style="font-size:.88em;color:var(--dim)"><input type="checkbox" id="st_fpe" x-model="config.fixed_prompt.enabled" checked> 启用固定提示词</label>
     </div>
-    <div class="fg"><label>提示词内容</label><textarea id="st_fp" x-model="config.fixed_prompt.content" rows="4" placeholder="每次对话都会附加此提示词到所有AI请求末尾" style="width:100%;padding:10px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
+    <div class="fg"><label>提示词内容</label><textarea id="st_fp" x-model="config.fixed_prompt.content" rows="4" placeholder="每次对话都会附加此提示词到所有AI请求末尾" style="width:100%;padding:10px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
   </div>
 </div>
 
@@ -407,7 +407,7 @@
   <div class="settings-section">
     <div class="settings-section-title">主题风格</div>
     <div class="fg">
-      <select id="st_th" onchange="previewTheme()" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
+      <select id="st_th" onchange="previewTheme()" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
         <option value="obsidian">深色 · 黑曜石（经典暗金）</option>
         <option value="midnight">深色 · 午夜蓝（静谧深邃）</option>
         <option value="crimson">深色 · 暗红（哥特神秘）</option>
@@ -432,7 +432,7 @@
   <div class="settings-section">
     <div class="settings-section-title">字体大小</div>
     <div class="fg">
-      <select id="st_fs" x-model="config.ui.font_size" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
+      <select id="st_fs" x-model="config.ui.font_size" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
         <option value="small">小</option>
         <option value="medium">中</option>
         <option value="large">大</option>
@@ -452,7 +452,7 @@
   <div class="settings-section">
     <div class="settings-section-title">NPC信息可见度</div>
     <div class="fg">
-      <select id="st_npc_visibility" x-model="config.npc_info_visibility" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
+      <select id="st_npc_visibility" x-model="config.npc_info_visibility" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
         <option value="immersive">沉浸模式（逐步解锁，初始只知传闻）</option>
         <option value="semi">半沉浸（显示名字和身份，秘密隐藏）</option>
         <option value="god">上帝模式（全部信息可见）</option>
@@ -478,7 +478,7 @@
     <div style="font-size:.78em;color:var(--dim);margin-bottom:10px;padding:8px 10px;background:rgba(212,175,55,.05);border-radius:6px">
       💡 玩家提示会显示在输入框上方，帮助玩家了解当前情境或提供操作指引
     </div>
-    <div class="fg"><label>提示内容</label><textarea id="st_player_hint" rows="3" placeholder="例如：「你现在身处破庙，周围一片狼藉...」" style="width:100%;padding:10px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
+    <div class="fg"><label>提示内容</label><textarea id="st_player_hint" rows="3" placeholder="例如：「你现在身处破庙，周围一片狼藉...」" style="width:100%;padding:10px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
   </div>
 </div>
 
@@ -490,8 +490,8 @@
     <div style="display:flex;flex-direction:column;gap:8px">
       <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px"><input type="checkbox" id="st_v10_reviewer_enabled" checked> 启用叙事审查器</label>
       <div style="display:flex;gap:12px;padding-left:24px">
-        <div class="fg" style="flex:1"><label>审查间隔</label><input type="number" id="st_v10_reviewer_interval" value="10" min="5" max="100" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
-        <div class="fg" style="flex:1"><label>最大教训数</label><input type="number" id="st_v10_reviewer_lessons" value="30" min="5" max="100" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+        <div class="fg" style="flex:1"><label>审查间隔</label><input type="number" id="st_v10_reviewer_interval" value="10" min="5" max="100" style="width:100%;padding:6px 10px;background:var(--panel-light);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+        <div class="fg" style="flex:1"><label>最大教训数</label><input type="number" id="st_v10_reviewer_lessons" value="30" min="5" max="100" style="width:100%;padding:6px 10px;background:var(--panel-light);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
       </div>
     </div>
   </div>
@@ -501,8 +501,8 @@
     <div style="display:flex;flex-direction:column;gap:8px">
       <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px"><input type="checkbox" id="st_v10_npc_memory_enabled" checked> 启用NPC程序记忆</label>
       <div style="display:flex;gap:12px;padding-left:24px">
-        <div class="fg" style="flex:1"><label>最大条目</label><input type="number" id="st_v10_npc_memory_max" value="30" min="5" max="100" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
-        <div class="fg" style="flex:1"><label>演化间隔(天)</label><input type="number" id="st_v10_npc_memory_evolve" value="10" min="1" max="50" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+        <div class="fg" style="flex:1"><label>最大条目</label><input type="number" id="st_v10_npc_memory_max" value="30" min="5" max="100" style="width:100%;padding:6px 10px;background:var(--panel-light);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+        <div class="fg" style="flex:1"><label>演化间隔(天)</label><input type="number" id="st_v10_npc_memory_evolve" value="10" min="1" max="50" style="width:100%;padding:6px 10px;background:var(--panel-light);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
       </div>
     </div>
   </div>
@@ -512,7 +512,7 @@
     <div style="display:flex;flex-direction:column;gap:8px">
       <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px"><input type="checkbox" id="st_v10_taskboard_enabled" checked> 启用世界任务板</label>
       <div style="display:flex;gap:12px;padding-left:24px">
-        <div class="fg" style="flex:1"><label>最大任务数</label><input type="number" id="st_v10_taskboard_max" value="20" min="5" max="50" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+        <div class="fg" style="flex:1"><label>最大任务数</label><input type="number" id="st_v10_taskboard_max" value="20" min="5" max="50" style="width:100%;padding:6px 10px;background:var(--panel-light);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
         <label style="font-size:.85em;color:var(--dim);display:flex;align-items:center;gap:6px;padding-top:20px"><input type="checkbox" id="st_v10_taskboard_auto" checked> 自动分配</label>
       </div>
     </div>
@@ -523,8 +523,8 @@
     <div style="display:flex;flex-direction:column;gap:8px">
       <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px"><input type="checkbox" id="st_v10_curator_enabled" checked> 启用记忆整理器</label>
       <div style="display:flex;gap:12px;padding-left:24px">
-        <div class="fg" style="flex:1"><label>整理间隔</label><input type="number" id="st_v10_curator_interval" value="15" min="5" max="100" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
-        <div class="fg" style="flex:1"><label>最大归档</label><input type="number" id="st_v10_curator_max" value="200" min="50" max="1000" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+        <div class="fg" style="flex:1"><label>整理间隔</label><input type="number" id="st_v10_curator_interval" value="15" min="5" max="100" style="width:100%;padding:6px 10px;background:var(--panel-light);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+        <div class="fg" style="flex:1"><label>最大归档</label><input type="number" id="st_v10_curator_max" value="200" min="50" max="1000" style="width:100%;padding:6px 10px;background:var(--panel-light);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
       </div>
     </div>
   </div>
@@ -534,7 +534,7 @@
     <div style="display:flex;flex-direction:column;gap:8px">
       <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px"><input type="checkbox" id="st_v10_butterfly_enabled"> 启用蝴蝶审批门</label>
       <div style="padding-left:24px">
-        <div class="fg"><label>影响阈值</label><input type="number" id="st_v10_butterfly_threshold" value="7.0" min="1" max="10" step="0.5" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+        <div class="fg"><label>影响阈值</label><input type="number" id="st_v10_butterfly_threshold" value="7.0" min="1" max="10" step="0.5" style="width:100%;padding:6px 10px;background:var(--panel-light);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
         <div style="font-size:.75em;color:var(--dim);margin-top:4px">高影响行为（超过此阈值）需要玩家确认</div>
       </div>
     </div>
@@ -543,9 +543,9 @@
   <div class="settings-section">
     <div class="settings-section-title">📚 分层记忆</div>
     <div style="display:flex;flex-direction:column;gap:8px;padding-left:24px">
-      <div class="fg"><label>重要性权重</label><input type="number" id="st_v10_memory_importance" value="0.25" min="0" max="1" step="0.05" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
-      <div class="fg"><label>时间衰减周期(天)</label><input type="number" id="st_v10_memory_decay" value="30" min="7" max="365" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
-      <div class="fg"><label>情感权重</label><input type="number" id="st_v10_memory_emotion" value="0.1" min="0" max="1" step="0.05" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+      <div class="fg"><label>重要性权重</label><input type="number" id="st_v10_memory_importance" value="0.25" min="0" max="1" step="0.05" style="width:100%;padding:6px 10px;background:var(--panel-light);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+      <div class="fg"><label>时间衰减周期(天)</label><input type="number" id="st_v10_memory_decay" value="30" min="7" max="365" style="width:100%;padding:6px 10px;background:var(--panel-light);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+      <div class="fg"><label>情感权重</label><input type="number" id="st_v10_memory_emotion" value="0.1" min="0" max="1" step="0.05" style="width:100%;padding:6px 10px;background:var(--panel-light);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
     </div>
   </div>
 
@@ -555,13 +555,13 @@
       <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px"><input type="checkbox" id="st_v10_foreshadow_enabled" checked> 启用伏笔生命周期</label>
       <div style="display:flex;gap:12px;padding-left:24px">
         <div class="fg" style="flex:1"><label>提醒模式</label>
-          <select id="st_v10_foreshadow_mode" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em">
+          <select id="st_v10_foreshadow_mode" style="width:100%;padding:6px 10px;background:var(--panel-light);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em">
             <option value="subtle">微妙</option>
             <option value="normal" selected>正常</option>
             <option value="obvious">明显</option>
           </select>
         </div>
-        <div class="fg" style="flex:1"><label>陈旧阈值(天)</label><input type="number" id="st_v10_foreshadow_stale" value="30" min="7" max="100" style="width:100%;padding:6px 10px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
+        <div class="fg" style="flex:1"><label>陈旧阈值(天)</label><input type="number" id="st_v10_foreshadow_stale" value="30" min="7" max="100" style="width:100%;padding:6px 10px;background:var(--panel-light);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.85em"></div>
       </div>
     </div>
   </div>
@@ -576,7 +576,7 @@
     <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px;margin-bottom:10px"><input type="checkbox" id="st_v10_multiagent_enabled" checked> 启用多智能体叙事（关键剧情时调用3个Agent协作生成）</label>
     <div class="fg">
       <label>触发灵敏度</label>
-      <select id="st_v10_multiagent_sensitivity" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
+      <select id="st_v10_multiagent_sensitivity" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
         <option value="high">高（关键剧情触发多，质量优先）</option>
         <option value="normal" selected>中（平衡模式，推荐）</option>
         <option value="low">低（极少触发，速度优先）</option>
@@ -625,7 +625,7 @@
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-shrink:0">
 <h2 style="margin:0">📜 名人谱</h2>
 <div style="display:flex;gap:10px;align-items:center">
-  <select id="who_visibility" onchange="setWhoVisibility(this.value)" style="padding:7px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
+  <select id="who_visibility" onchange="setWhoVisibility(this.value)" style="padding:7px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
     <option value="immersive">沉浸模式</option>
     <option value="semi">半沉浸</option>
     <option value="god">上帝模式</option>
@@ -667,10 +667,10 @@
 <div class="fg"><label>职业/身份</label><input type="text" id="npc_role" placeholder="例：丫鬟、商人、侠客"></div>
 <div class="fg"><label>性格</label><input type="text" id="npc_personality" placeholder="例：活泼开朗、阴险狡诈"></div>
 <div class="fg"><label>说话风格</label><input type="text" id="npc_speaking" placeholder="例：粗犷豪放、文静内敛"></div>
-<div class="fg"><label>对话示例（每行一句）</label><textarea id="npc_examples" rows="3" placeholder='例：&#10;小翠：公子，茶来了。&#10;小翠：公子你又熬夜了，身体要紧啊。' style="width:100%;padding:10px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
+<div class="fg"><label>对话示例（每行一句）</label><textarea id="npc_examples" rows="3" placeholder='例：&#10;小翠：公子，茶来了。&#10;小翠：公子你又熬夜了，身体要紧啊。' style="width:100%;padding:10px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
 <div class="fg"><label>所在位置</label><input type="text" id="npc_location" placeholder="留空则跟随玩家位置"></div>
 <div style="display:flex;gap:10px">
-<div class="fg" style="flex:1"><label>与玩家关系</label><select id="npc_relation" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em" onchange="var c=$('npc_relation_custom');if(this.value==='__custom__'){c.style.display='block';c.focus();}else{c.style.display='none';}"><option value="陌生人">陌生人</option><option value="朋友">朋友</option><option value="师徒">师徒</option><option value="下属">下属</option><option value="爱人">爱人</option><option value="亲人">亲人</option><option value="敌人">敌人</option><option value="同门">同门</option><option value="主仆">主仆</option><option value="邻居">邻居</option><option value="生意伙伴">生意伙伴</option><option value="恩人">恩人</option><option value="仇人">仇人</option><option value="青梅竹马">青梅竹马</option><option value="未婚夫妻">未婚夫妻</option><option value="义兄弟">义兄弟</option><option value="__custom__">✏️ 自定义...</option></select><input type="text" id="npc_relation_custom" placeholder="输入自定义关系" style="display:none;width:100%;padding:9px 12px;margin-top:6px;background:rgba(0,0,0,.3);border:1px solid var(--gold);border-radius:8px;color:var(--text);font-size:.88em;outline:none"></div>
+<div class="fg" style="flex:1"><label>与玩家关系</label><select id="npc_relation" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em" onchange="var c=$('npc_relation_custom');if(this.value==='__custom__'){c.style.display='block';c.focus();}else{c.style.display='none';}"><option value="陌生人">陌生人</option><option value="朋友">朋友</option><option value="师徒">师徒</option><option value="下属">下属</option><option value="爱人">爱人</option><option value="亲人">亲人</option><option value="敌人">敌人</option><option value="同门">同门</option><option value="主仆">主仆</option><option value="邻居">邻居</option><option value="生意伙伴">生意伙伴</option><option value="恩人">恩人</option><option value="仇人">仇人</option><option value="青梅竹马">青梅竹马</option><option value="未婚夫妻">未婚夫妻</option><option value="义兄弟">义兄弟</option><option value="__custom__">✏️ 自定义...</option></select><input type="text" id="npc_relation_custom" placeholder="输入自定义关系" style="display:none;width:100%;padding:9px 12px;margin-top:6px;background:var(--panel-light);border:1px solid var(--gold);border-radius:8px;color:var(--text);font-size:.88em;outline:none"></div>
 <div class="fg" style="flex:1"><label>初始好感 (0-100)</label><input type="number" id="npc_favor" value="50" min="0" max="100"></div>
 </div>
 <div class="fg"><label>标签（逗号分隔）</label><input type="text" id="npc_tags" placeholder="例：侍女,心腹"></div>
@@ -678,18 +678,18 @@
 </div></div>
 
 <div class="modal" id="editNpcModal"><div class="modal-box" style="width:600px;max-height:88vh;overflow-y:auto"><span class="close" onclick="closeEditNpc()">&times;</span><h2>✏️ 修改角色</h2>
-<div class="fg"><label>选择角色</label><select id="edit_npc_select" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em" onchange="loadNpcForEdit()"><option value="">-- 请选择 --</option></select></div>
+<div class="fg"><label>选择角色</label><select id="edit_npc_select" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em" onchange="loadNpcForEdit()"><option value="">-- 请选择 --</option></select></div>
 <div id="editNpcForm" style="display:none">
 <div class="fg"><label>名字</label><input type="text" id="edit_npc_name"></div>
 <div class="fg"><label>年龄</label><input type="number" id="edit_npc_age" min="1" max="200"></div>
 <div class="fg"><label>职业/身份</label><input type="text" id="edit_npc_role"></div>
 <div class="fg"><label>MBTI性格类型</label><input type="text" id="edit_npc_mbti" placeholder="例：INTJ、ENFP"></div>
-<div class="fg"><label>性格描述</label><textarea id="edit_npc_personality" rows="2" style="width:100%;padding:10px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
+<div class="fg"><label>性格描述</label><textarea id="edit_npc_personality" rows="2" style="width:100%;padding:10px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
 <div class="fg"><label>说话风格</label><input type="text" id="edit_npc_speaking"></div>
-<div class="fg"><label>对话示例（每行一句）</label><textarea id="edit_npc_examples" rows="3" style="width:100%;padding:10px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
+<div class="fg"><label>对话示例（每行一句）</label><textarea id="edit_npc_examples" rows="3" style="width:100%;padding:10px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
 <div class="fg"><label>所在位置</label><input type="text" id="edit_npc_location"></div>
 <div style="display:flex;gap:10px">
-<div class="fg" style="flex:1"><label>与玩家关系</label><select id="edit_npc_relation" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"><option value="陌生人">陌生人</option><option value="朋友">朋友</option><option value="师徒">师徒</option><option value="下属">下属</option><option value="爱人">爱人</option><option value="亲人">亲人</option><option value="敌人">敌人</option><option value="同门">同门</option><option value="主仆">主仆</option><option value="邻居">邻居</option><option value="生意伙伴">生意伙伴</option><option value="恩人">恩人</option><option value="仇人">仇人</option><option value="青梅竹马">青梅竹马</option><option value="未婚夫妻">未婚夫妻</option><option value="义兄弟">义兄弟</option></select></div>
+<div class="fg" style="flex:1"><label>与玩家关系</label><select id="edit_npc_relation" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"><option value="陌生人">陌生人</option><option value="朋友">朋友</option><option value="师徒">师徒</option><option value="下属">下属</option><option value="爱人">爱人</option><option value="亲人">亲人</option><option value="敌人">敌人</option><option value="同门">同门</option><option value="主仆">主仆</option><option value="邻居">邻居</option><option value="生意伙伴">生意伙伴</option><option value="恩人">恩人</option><option value="仇人">仇人</option><option value="青梅竹马">青梅竹马</option><option value="未婚夫妻">未婚夫妻</option><option value="义兄弟">义兄弟</option></select></div>
 <div class="fg" style="flex:1"><label>好感度 (0-100)</label><input type="number" id="edit_npc_favor" min="0" max="100"></div>
 </div>
 <div class="fg"><label>标签（逗号分隔）</label><input type="text" id="edit_npc_tags"></div>
@@ -705,7 +705,7 @@
 <h3 style="color:var(--accent);font-size:.85em;margin:14px 0 8px;padding-bottom:6px;border-bottom:1px solid var(--border)">🧠 AI行为</h3>
 <div class="fg"><label>当前目标</label><input type="text" id="edit_ai_goal"></div>
 <div class="fg"><label>长期目标</label><input type="text" id="edit_ai_long_goal"></div>
-<div class="fg"><label>决策风格</label><select id="edit_ai_style" style="width:100%;padding:9px 12px;background:rgba(0,0,0,.3);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"><option value="normal">普通</option><option value="cautious">谨慎</option><option value="aggressive">激进</option><option value="passive">被动</option><option value="cunning">狡诈</option></select></div>
+<div class="fg"><label>决策风格</label><select id="edit_ai_style" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"><option value="normal">普通</option><option value="cautious">谨慎</option><option value="aggressive">激进</option><option value="passive">被动</option><option value="cunning">狡诈</option></select></div>
 <button class="btn" onclick="doEditNpc()" style="margin-top:16px;width:100%">💾 保存修改</button>
 </div>
 </div></div>
@@ -1070,8 +1070,8 @@
 <script src="/js/dom.js?v=3"></script>
 <script src="/js/core.js?v=3"></script>
 <script src="/js/bg-manager.js?v=1"></script>
-<script src="/js/ui.js?v=8"></script>
-<script src="/js/game.js?v=10"></script>
+<script src="/js/ui.js?v=11"></script>
+<script src="/js/game.js?v=11"></script>
 <script src="/js/config-shared.js?v=3"></script>
 <script src="/js/settings.js?v=7"></script>
 <script src="/js/v10_panel.js?v=3"></script>

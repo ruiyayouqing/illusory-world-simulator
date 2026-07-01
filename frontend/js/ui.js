@@ -231,22 +231,57 @@ function clearOpts() {
   $('og').innerHTML = '';
 }
 
+var outputLog = [];
+
 function restoreHistory(history, images) {
   var nb = $('nb');
   nb.innerHTML = '';
+  var imgIndex = 0;
+  var imgList = (images || []).filter(function(img) { return img.generated && img.image_url; });
+  if (typeof outputLog === 'undefined') window.outputLog = [];
+  outputLog = [];
   history.forEach(function(h) {
+    var hDay = h.day || 0;
+    var hTime = h.time || '';
+    while (imgIndex < imgList.length && imgList[imgIndex].day <= hDay) {
+      if (imgList[imgIndex].day === hDay && imgList[imgIndex].time && hTime && imgList[imgIndex].time > hTime) break;
+      var img = document.createElement('img');
+      img.src = imgList[imgIndex].image_url;
+      img.className = 'inline-img';
+      nb.appendChild(img);
+      imgIndex++;
+    }
     if (h.type === 'narrative') {
       if (h.player_input) addNarrative('> ' + h.player_input, false, true);
       addNarrative(h.text);
       if (h.day) addSystem('第' + h.day + '天 ' + h.time);
+      outputLog.push({
+        time: (h.day ? '第' + h.day + '天 ' : '') + (h.time || ''),
+        input: h.player_input || '',
+        narrative: h.text || '',
+        options: [],
+      });
     } else if (h.type === 'event') {
       addNarrative(h.text, true);
+      outputLog.push({
+        time: (h.day ? '第' + h.day + '天 ' : '') + (h.time || ''),
+        input: '[世界事件]',
+        narrative: h.text || '',
+        options: [],
+      });
     } else if (h.type === 'summary') {
       var summaryText = '【历史摘要】第' + (h.day_range ? h.day_range[0] + '-' + h.day_range[1] : '?') + '天\n' + h.text;
       addNarrative(summaryText, true);
     }
   });
-  addSystem('已加载 ' + history.length + ' 条历史记录');
+  while (imgIndex < imgList.length) {
+    var img = document.createElement('img');
+    img.src = imgList[imgIndex].image_url;
+    img.className = 'inline-img';
+    nb.appendChild(img);
+    imgIndex++;
+  }
+  addSystem('已加载 ' + history.length + ' 条历史记录' + (imgList.length ? '，' + imgList.length + ' 张图片' : ''));
 }
 
 function showOpts(opts) {

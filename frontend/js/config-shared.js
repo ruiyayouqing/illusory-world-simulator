@@ -33,7 +33,7 @@ var CONFIG_SECTIONS = {
   },
   game: {
     fields: ['narrative_style', 'narrative_style_custom', 'narrative_perspective', 'economy_enabled', 'narrative_max_chars', 'action_validation_enabled'],
-    defaults: { narrative_style: '章回体', narrative_style_custom: '', narrative_perspective: 'second', economy_enabled: false, narrative_max_chars: 1000, action_validation_enabled: false }
+    defaults: { narrative_style: '网文爽文', narrative_style_custom: '', narrative_perspective: 'third', economy_enabled: false, narrative_max_chars: 1000, action_validation_enabled: true }
   }
 };
 
@@ -45,7 +45,7 @@ function buildConfigFromResponse(res) {
     config[section] = Object.assign({}, def.defaults, res[section] || {});
   }
   config.npc_info_visibility = res.npc_info_visibility || 'immersive';
-  config.game = res.game || { narrative_style: '章回体' };
+  config.game = res.game || { narrative_style: '网文爽文' };
   return config;
 }
 

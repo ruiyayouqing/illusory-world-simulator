@@ -287,11 +287,31 @@ class NpcSpawner:
 
         # 解析关系类型
         relation_desc = design.get("relation_to_player", "陌生")
-        relation_type = "neutral"
-        if "敌" in relation_desc or "厌" in relation_desc:
-            relation_type = "hostile"
-        elif "友" in relation_desc or "敬" in relation_desc or "亲" in relation_desc:
-            relation_type = "friendly"
+        relation_type = "陌生人"
+        if "敌" in relation_desc or "厌" in relation_desc or "仇" in relation_desc:
+            relation_type = "敌人"
+        elif "爱人" in relation_desc or "恋人" in relation_desc or "夫妻" in relation_desc:
+            relation_type = "爱人"
+        elif "师" in relation_desc and ("父" in relation_desc or "徒" not in relation_desc):
+            relation_type = "师徒"
+        elif "下属" in relation_desc or "部下" in relation_desc or "侍从" in relation_desc:
+            relation_type = "下属"
+        elif "亲人" in relation_desc or "家人" in relation_desc or "父子" in relation_desc or "母子" in relation_desc:
+            relation_type = "亲人"
+        elif "朋友" in relation_desc or "好友" in relation_desc or "挚友" in relation_desc:
+            relation_type = "朋友"
+        elif "邻居" in relation_desc:
+            relation_type = "邻居"
+        elif "同门" in relation_desc or "师兄弟" in relation_desc:
+            relation_type = "同门"
+        elif "主" in relation_desc and "仆" in relation_desc:
+            relation_type = "主仆"
+        elif "生意" in relation_desc or "商" in relation_desc:
+            relation_type = "生意伙伴"
+        elif "恩" in relation_desc:
+            relation_type = "恩人"
+        elif "青梅" in relation_desc:
+            relation_type = "青梅竹马"
 
         # 创建 NPCState
         npc = NPCState(

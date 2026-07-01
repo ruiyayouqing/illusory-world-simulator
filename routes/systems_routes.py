@@ -183,6 +183,16 @@ async def generate_image(req: ImageRequest):
 Location: {location}. Weather: {weather}.
 Style: {style}, masterpiece quality, detailed, 8k resolution."""
         result = engine.visual_engine.generate_image(prompt)
+        if result.get("generated"):
+            day = engine.world_state.current_day if engine.world_state else 0
+            time_str = engine.world_state.current_time if engine.world_state else ""
+            result["location"] = location
+            result["weather"] = weather
+            result["day"] = day
+            result["time"] = time_str
+            engine.visual_engine.image_history.append(result)
+            if len(engine.visual_engine.image_history) > 50:
+                engine.visual_engine.image_history = engine.visual_engine.image_history[-50:]
     else:
         result = engine.generate_scene_image("")
 

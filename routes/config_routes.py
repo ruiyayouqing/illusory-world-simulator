@@ -111,7 +111,7 @@ class FullSettingsRequest(BaseModel):
     economy_enabled: bool = False
     narrative_max_chars: int = 1000  # [v10.6] 叙事最大字数
     streaming_enabled: bool = True  # [v11] 流式输出开关
-    action_validation_enabled: bool = False  # [v11] 行动合理性校验开关
+    action_validation_enabled: bool = True  # [v11] 行动合理性校验开关
     v10: dict = {}  # [v10.6+] v10高级配置
 
 
@@ -566,7 +566,7 @@ def _apply_v10_config(eng, v10_config: dict):
             eng.multi_agent_narrative.enabled = ma.get('enabled', True)
             eng.multi_agent_narrative.max_revisions = ma.get('max_revisions', 1)
         # 触发灵敏度：保存在引擎级变量，供 TurnProcessorV2 使用
-        eng.multi_agent_sensitivity = ma.get('sensitivity', 'normal')
+        eng.multi_agent_sensitivity = ma.get('sensitivity', 'low')
 
 
 @router.get("/stats")
@@ -703,7 +703,7 @@ async def upload_description(file: UploadFile = File(...)):
 class SetStyleRequest(BaseModel):
     style_name: str
     custom_text: str = ""
-    narrative_perspective: str = "second"  # second/third/first
+    narrative_perspective: str = "third"  # second/third/first
 
 
 class AddCustomStyleRequest(BaseModel):

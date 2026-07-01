@@ -101,42 +101,19 @@ class WorldManager:
         if eng.player_state and eng.player_agent:
             eng.player_agent.rest(eng.player_state)
 
-        # [v9] 限制叙事历史大小，防止内存无限增长
-        # [Bug] 截断前先调用 Curator 压缩旧条目，避免关键剧情直接丢失
+        # [v10] 生成摘要供 LLM 使用，但保留完整对话历史
         if len(eng.narrative_history) > eng.MAX_NARRATIVE_HISTORY:
-            # 先尝试用 Curator 压缩超出阈值的部分
             if eng.memory_curator:
                 try:
-                    # 计算需要压缩多少条：超出 KEEP 的部分
-                    excess = len(eng.narrative_history) - eng.NARRATIVE_HISTORY_KEEP
-                    # 每次压缩 summary_interval(10) 条为 1 条，循环压缩直到低于阈值
-                    compress_rounds = 0
-                    while (len(eng.narrative_history) > eng.NARRATIVE_HISTORY_KEEP
-                           and compress_rounds < 20):  # 安全上限，防止无限循环
-                        summary_result = eng.memory_curator.summarize_history(
-                            eng.narrative_history,
-                            current_turn=eng.meta.turn_count if eng.meta else 0,
-                            current_day=eng.world_state.current_day if eng.world_state else 1,
-                        )
-                        if summary_result.get("status") == "skipped":
-                            break  # Curator 跳过（条目不足或刚压缩过）
-                        # 替换 narrative_history
-                        eng.narrative_history = (
-                            summary_result.get("replacement", [])
-                            + summary_result.get("remaining", [])
-                        )
-                        eng._narrative_compressed = True
-                        compress_rounds += 1
-                    logger.info("Narrative history compressed %d rounds, now %d entries",
-                                compress_rounds, len(eng.narrative_history))
+                    eng.memory_curator.generate_summary_only(
+                        eng.narrative_history,
+                        current_turn=eng.meta.turn_count if eng.meta else 0,
+                        current_day=eng.world_state.current_day if eng.world_state else 1,
+                    )
+                    logger.info("Day-end summary generated (history preserved): %d entries",
+                                len(eng.narrative_history))
                 except Exception as e:
-                    logger.warning("Curator compression before trim failed: %s", e)
-
-            # 如果压缩后仍超过阈值，才执行硬截断（保留最近的条目）
-            if len(eng.narrative_history) > eng.MAX_NARRATIVE_HISTORY:
-                eng.narrative_history = eng.narrative_history[-eng.NARRATIVE_HISTORY_KEEP:]
-                logger.warning("Narrative history hard-trimmed to %d entries (Curator insufficient)",
-                               eng.NARRATIVE_HISTORY_KEEP)
+                    logger.warning("Day-end summary generation failed: %s", e)
 
         # 自动日终小说生成
         if eng.last_novel_checkpoint < len(eng.narrative_history) - 2:

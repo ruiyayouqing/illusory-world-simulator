@@ -74,6 +74,17 @@ class SaveMixin:
         self.narrative_history = list(state.get("narrative_history", []))
         self._persisted_narrative_count = len(self.narrative_history)
         self._narrative_compressed = False
+        # [Bug] 恢复 visual_engine.image_history，否则加载 slot 后已生成的图片无法显示
+        if self.visual_engine:
+            try:
+                import json as _json
+                from pathlib import Path
+                gs_file = self.save_manager.base_dir / self.current_world_id / "state" / "game_state.json"
+                if gs_file.exists():
+                    gs = _json.loads(gs_file.read_text(encoding="utf-8"))
+                    self.visual_engine.image_history = gs.get("visual_engine", {}).get("image_history", [])
+            except Exception:
+                pass
         return True
 
     def list_slots(self: "GameEngine") -> list[dict]:
