@@ -26,7 +26,7 @@ class CreateGameRequest(BaseModel):
     api_key: str
     base_url: str = "https://token-plan-cn.xiaomimimo.com/v1"
     model_name: str = "mimo-V2.5-Pro"
-    world_name: str = "大明风华"
+    world_name: str = "自定义世界"
 
 
 class LoadGameRequest(BaseModel):
@@ -168,28 +168,7 @@ async def get_state():
 
 @router.post("/create")
 async def create_game(req: CreateGameRequest):
-    # [v10.5] 加 _engine_switch_lock，防止并发创建/加载导致全局 engine 竞态
-    async with _engine_switch_lock:
-        engine = GameEngine(str(BASE_DIR / "saves"))
-        engine.init_llm(req.api_key, req.base_url, req.model_name)
-
-        _apply_image_config(engine)
-
-        world_path = BASE_DIR / "data" / "worlds" / "demo_ming" / "world.json"
-        world_data = json.loads(world_path.read_text(encoding="utf-8"))
-        player_data = world_data["roles"]["player"]
-        npc_data_list = [world_data["roles"]["npc_苏梅"], world_data["roles"]["npc_张大叔"]]
-
-        world_id = engine.create_new_game(world_data, player_data, npc_data_list, req.world_name)
-        state = engine.get_game_state()
-        engine.save_game("auto")
-        # [Bug] 必须在游戏状态完全初始化后才 set_engine，否则其他请求可能读到半初始化的引擎
-        set_engine(engine)
-
-    return {
-        "world_id": world_id,
-        "state": state,
-    }
+    raise HTTPException(status_code=410, detail="示例世界已移除，请使用 /api/generate-world 生成自定义世界")
 
 
 @router.post("/load")
