@@ -35,8 +35,12 @@ class GameConfig(BaseModel):
     npc_offline_evolution: bool = True
     narrative_style: str = "网文爽文"
     narrative_style_custom: str = ""
+    narrative_perspective: str = "third"
     max_context: int = Field(default=16384, ge=2048, le=32768)
     economy_enabled: bool = False
+    action_validation_enabled: bool = True
+    streaming_enabled: bool = True
+    narrative_max_chars: int = Field(default=1000, ge=200, le=5000)
 
 
 class ServerConfig(BaseModel):

@@ -276,6 +276,11 @@ class TurnProcessorV2:
                     npc_states=eng.npc_states,
                 )
                 refreshed = metadata.get("options", [])
+                # [Bug1-fix] 同步更新 dice_check：二次 metadata 调用可能产生了 dice_check，
+                # 若 response 中尚无 dice_check，则回填，确保危险行动能触发骰子判定
+                meta_dice = metadata.get("dice_check")
+                if meta_dice and meta_dice.get("needed") and not response.get("dice_check", {}).get("needed"):
+                    response["dice_check"] = meta_dice
                 if refreshed and len(refreshed) >= 3:
                     if not self._options_need_refresh(refreshed, narrative):
                         response.setdefault("_options_refreshed_from_narrative", True)
@@ -342,7 +347,7 @@ class TurnProcessorV2:
 
         # 检查配置是否启用了行动校验
         config = eng._load_config() if hasattr(eng, '_load_config') else {}
-        if not config.get("game", {}).get("action_validation_enabled", False):
+        if not config.get("game", {}).get("action_validation_enabled", True):
             return None
 
         # 构建世界类型信息

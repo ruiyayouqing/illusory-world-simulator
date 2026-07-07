@@ -1,0 +1,21 @@
+[Unit]
+Description=Taiwuyunjing Cloud Service (太虚幻境云服务)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/taiwuyunjing
+ExecStart=/opt/taiwuyunjing/venv/bin/uvicorn server:app --host 127.0.0.1 --port 8004 --workers 1
+Restart=always
+RestartSec=5
+StandardOutput=append:/opt/taiwuyunjing/server.log
+StandardError=append:/opt/taiwuyunjing/server.log
+
+# 环境变量
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/opt/taiwuyunjing
+
+[Install]
+WantedBy=multi-user.target

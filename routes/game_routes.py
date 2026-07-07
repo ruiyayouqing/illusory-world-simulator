@@ -268,6 +268,28 @@ async def player_input(req: PlayerInputRequest):
         return {"error": f"处理输入失败: {e}"}
 
 
+@router.post("/undo")
+async def undo_last_turn():
+    """[v11] 撤销最后一次玩家行动及AI回复"""
+    engine = get_engine()
+    if not engine or not engine.player_state:
+        raise HTTPException(status_code=503, detail="游戏未初始化")
+    try:
+        async with engine._game_lock:
+            undo_result = await asyncio.to_thread(engine.undo_last_turn)
+            state = engine.get_game_state() if undo_result.get("success") else None
+        if undo_result.get("success"):
+            logger.info("Undo successful: removed %d entries", undo_result.get("removed", 0))
+        return {"success": undo_result.get("success", False),
+                "removed": undo_result.get("removed", 0),
+                "remaining": undo_result.get("remaining", 0),
+                "error": undo_result.get("error"),
+                "state": state}
+    except Exception as e:
+        logger.error("Undo failed: %s", e, exc_info=True)
+        return {"success": False, "error": f"撤销失败: {e}"}
+
+
 @router.post("/event")
 async def trigger_event():
     engine = get_engine()
@@ -626,3 +648,120 @@ async def get_narrative_history(world_id: str):
     except Exception as e:
         logger.warning("Failed to load narrative history: %s", e)
         return {"entries": [], "error": str(e)}
+
+
+# ═══════════════════════════════════════════════════════════════
+# 功能1：AI世界观生成
+# ═══════════════════════════════════════════════════════════════
+
+class GenerateWorldviewRequest(BaseModel):
+    world_type: str = "custom"
+    existing_description: str = ""
+
+
+@router.post("/generate-worldview")
+async def generate_worldview(req: GenerateWorldviewRequest):
+    """根据世界类型和已有描述，AI生成世界观和主角身份。
+    如果 world_type 为 custom，则从8种世界类型中随机选择一种。
+    如果已有描述不为空，则基于已有描述扩展。
+    返回300-500字的世界观+主角身份设定。"""
+    import random
+    from pathlib import Path
+    from modules.llm.mimo_llm import MimoLLM
+
+    engine = get_engine()
+    llm = None
+
+    if engine and engine.llm:
+        llm = engine.llm
+    else:
+        config_path = Path(__file__).parent.parent / "config.json"
+        if config_path.exists():
+            try:
+                raw = json.loads(config_path.read_text(encoding="utf-8"))
+                cfg = decrypt_config_keys(raw)
+                llm_cfg = cfg.get("llm", {})
+                api_key = llm_cfg.get("api_key", "")
+                base_url = llm_cfg.get("base_url", "")
+                model_name = llm_cfg.get("model_name", "")
+                max_tokens = llm_cfg.get("max_tokens", 0)
+                if api_key and base_url and model_name:
+                    llm = MimoLLM(
+                        api_key=api_key,
+                        base_url=base_url,
+                        model_name=model_name,
+                        default_max_tokens=max_tokens,
+                    )
+            except Exception as e:
+                logger.warning("Failed to create temp LLM for worldview: %s", e)
+
+    if not llm:
+        return {"ok": False, "msg": "请检查模型配置", "worldview": ""}
+
+    world_type = req.world_type
+    existing_description = (req.existing_description or "").strip()
+
+    WORLD_TYPE_MAP = {
+        "custom": "随机世界",
+        "historical": "历史穿越",
+        "fantasy": "奇幻冒险",
+        "scifi": "科幻未来",
+        "postapocalyptic": "末日生存",
+        "wuxia": "武侠江湖",
+        "xianxia": "修仙问道",
+        "modern": "现代生活",
+        "urban_fantasy": "都市异能",
+    }
+
+    if world_type == "custom":
+        import random
+        types_list = [k for k in WORLD_TYPE_MAP.keys() if k != "custom"]
+        world_type = random.choice(types_list)
+
+    world_type_name = WORLD_TYPE_MAP.get(world_type, world_type)
+
+    prompt = f"""
+你是一个专业的世界设定师。请根据以下要求，生成一个完整的世界观和主角身份设定。
+
+【世界类型】{world_type_name}
+
+【已有描述】
+{existing_description if existing_description else "（无）"}
+
+【任务要求】
+1. 如果已有描述不为空，基于已有描述扩展生成；如果为空，则完全由你创作
+2. 生成内容包括两部分：
+   - 世界观设定（世界背景、势力分布、力量体系等）
+   - 主角身份设定（姓名、年龄、出身、目标、性格特点）
+3. 字数控制在300-500字之间
+4. 风格要符合该世界类型的特点
+5. 主角身份要有故事性和可塑性，适合作为游戏的起点
+
+【输出格式】
+直接输出设定文本，不需要任何前缀或后缀。
+
+示例（武侠江湖）：
+世界观：大炎王朝末年，朝廷腐败，江湖纷乱。武林分为正道八大门派与魔道三宗，还有神秘的杀手组织"暗影阁"在暗处搅动风云。西域魔教觊觎中原已久，江湖暗流涌动。
+
+主角：李清风，二十一岁，出身江南书香门第。其父是被冤枉的忠臣，全家被灭门时侥幸逃脱，后被隐世高人收养传授武艺。性格外柔内刚，心怀家国大义，誓要查明真相、重振家门。目前以游历江湖的书生身份行走天下，暗中调查当年灭门案的线索。
+"""
+
+    try:
+        result = await asyncio.to_thread(llm.chat, prompt, temperature=0.7, max_tokens=800)
+        worldview = (result or "").strip()
+        if worldview:
+            return {"ok": True, "msg": "生成成功", "worldview": worldview, "world_type": world_type}
+        else:
+            return {"ok": False, "msg": "生成内容为空，请重试", "worldview": ""}
+    except Exception as e:
+        logger.error("Failed to generate worldview: %s", e)
+        err_str = str(e)
+        if "401" in err_str or "api key" in err_str.lower() or "authentication" in err_str.lower():
+            return {"ok": False, "msg": "请检查模型配置", "worldview": ""}
+        return {"ok": False, "msg": f"生成失败: {err_str[:100]}", "worldview": ""}
+    finally:
+        if not engine and llm and hasattr(llm, 'close'):
+            try:
+                llm.close()
+            except Exception:
+                pass

@@ -27,6 +27,14 @@ def _write_config(config: dict):
     eng = get_engine()
     if eng:
         eng.invalidate_config_cache()
+        # [Bug2-fix] 清除引擎内 NarrativeStyleManager 的缓存，
+        # 否则修改叙事风格/视角后不生效（eng.narrative.style_manager 是独立实例，
+        # 与本文件模块级的 _style_manager 不是同一个）
+        try:
+            if hasattr(eng, 'narrative') and getattr(eng.narrative, 'style_manager', None):
+                eng.narrative.style_manager.invalidate_cache()
+        except Exception as e:
+            logger.warning("Failed to invalidate narrative style manager cache: %s", e)
 
 
 def _mask_key(key: str) -> str:
@@ -545,7 +553,7 @@ def _apply_v10_config(eng, v10_config: dict):
     if 'butterfly_approval_gate' in v10_config:
         bf = v10_config['butterfly_approval_gate']
         if hasattr(eng, 'butterfly_approval_gate'):
-            eng.butterfly_approval_gate.enabled = bf.get('enabled', False)
+            eng.butterfly_approval_gate.enabled = bf.get('enabled', True)
             eng.butterfly_approval_gate.approval_threshold = bf.get('approval_threshold', 7.0)
     # 伏笔生命周期
     if 'foreshadow_lifecycle' in v10_config:
@@ -735,7 +743,7 @@ async def get_narrative_styles():
     for name, desc in config.get("narrative_styles", {}).items():
         styles[name] = {"description": desc, "builtin": False}
 
-    active = config.get("game", {}).get("narrative_style", "章回体")
+    active = config.get("game", {}).get("narrative_style", "网文爽文")
     custom_text = config.get("game", {}).get("narrative_style_custom", "")
 
     return {
@@ -832,3 +840,127 @@ async def upload_style_file(file: UploadFile = File(...)):
         "filename": file.filename,
         "extracted_style": keywords,
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# [Bug5] 测试大模型联通性 API
+# ═══════════════════════════════════════════════════════════════
+
+class TestConnectionRequest(BaseModel):
+    api_key: str
+    base_url: str
+    model_name: str
+    model_type: str = "llm"  # llm / cheap / dialogue / image / embedding
+
+
+@router.post("/test-llm-connection")
+async def test_llm_connection(req: TestConnectionRequest):
+    """测试大模型联通性：发送一个轻量级请求，验证 API Key / Base URL / 模型名是否可用。
+    model_type:
+      - llm / cheap / dialogue: 发送 chat completions 请求
+      - image: 发送 images.generations 请求（最小尺寸）
+      - embedding: 发送 embeddings 请求
+    """
+    import asyncio
+    api_key = (req.api_key or "").strip()
+    base_url = (req.base_url or "").strip()
+    model_name = (req.model_name or "").strip()
+    model_type = (req.model_type or "llm").strip()
+
+    if not api_key:
+        return {"ok": False, "msg": "API Key 为空"}
+    if not base_url:
+        return {"ok": False, "msg": "Base URL 为空"}
+    if not model_name:
+        return {"ok": False, "msg": "模型名称为空"}
+
+    try:
+        if model_type in ("llm", "cheap", "dialogue"):
+            # 文本对话模型：用 OpenAI 兼容接口发送极简请求
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=20.0, max_retries=0)
+            try:
+                resp = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=model_name,
+                        messages=[{"role": "user", "content": "Hi"}],
+                        max_tokens=5,
+                    ),
+                    timeout=20.0,
+                )
+                ok = bool(resp and resp.choices)
+                msg = "连接成功" if ok else "返回为空，请检查模型名"
+            finally:
+                await client.close()
+            return {"ok": ok, "msg": msg}
+
+        elif model_type == "image":
+            # 文生图模型：发送最小尺寸的图片生成请求
+            import httpx
+            # 标准化 URL：确保以 /images/generations 结尾
+            url = base_url.rstrip("/")
+            if not url.endswith("/images/generations"):
+                if url.endswith("/v1"):
+                    url = url + "/images/generations"
+                elif "/v1" not in url:
+                    url = url + "/v1/images/generations"
+                else:
+                    url = url + "/images/generations"
+            async with httpx.AsyncClient(timeout=25.0) as http:
+                r = await http.post(
+                    url,
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={"model": model_name, "prompt": "test", "image_size": "square_hd"},
+                )
+            if r.status_code == 200:
+                return {"ok": True, "msg": "连接成功"}
+            else:
+                try:
+                    err = r.json()
+                    err_msg = err.get("error", {}).get("message") or err.get("message") or r.text[:200]
+                except Exception:
+                    err_msg = r.text[:200]
+                return {"ok": False, "msg": f"HTTP {r.status_code}: {err_msg}"}
+
+        elif model_type == "embedding":
+            # 嵌入模型：发送极简 embedding 请求
+            import httpx
+            url = base_url.rstrip("/")
+            if not url.endswith("/embeddings"):
+                if url.endswith("/v1"):
+                    url = url + "/embeddings"
+                elif "/v1" not in url:
+                    url = url + "/v1/embeddings"
+                else:
+                    url = url + "/embeddings"
+            async with httpx.AsyncClient(timeout=20.0) as http:
+                r = await http.post(
+                    url,
+                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    json={"model": model_name, "input": "test"},
+                )
+            if r.status_code == 200:
+                return {"ok": True, "msg": "连接成功"}
+            else:
+                try:
+                    err = r.json()
+                    err_msg = err.get("error", {}).get("message") or err.get("message") or r.text[:200]
+                except Exception:
+                    err_msg = r.text[:200]
+                return {"ok": False, "msg": f"HTTP {r.status_code}: {err_msg}"}
+
+        else:
+            return {"ok": False, "msg": f"未知模型类型: {model_type}"}
+
+    except asyncio.TimeoutError:
+        return {"ok": False, "msg": "连接超时（20秒），请检查 Base URL 或网络"}
+    except Exception as e:
+        err_str = str(e)
+        # 友好化常见错误
+        if "401" in err_str or "authentication" in err_str.lower() or "api key" in err_str.lower():
+            return {"ok": False, "msg": "认证失败，请检查 API Key"}
+        if "model" in err_str.lower() and ("not found" in err_str.lower() or "does not exist" in err_str.lower()):
+            return {"ok": False, "msg": f"模型不存在: {model_name}"}
+        if "connection" in err_str.lower() or "timeout" in err_str.lower():
+            return {"ok": False, "msg": "无法连接到服务器，请检查 Base URL"}
+        return {"ok": False, "msg": err_str[:300]}

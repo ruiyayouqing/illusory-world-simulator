@@ -139,6 +139,56 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str,
                 text = msg.get("text", "")
                 if text and engine.streamer:
                     await engine.streamer.stream_narrative(client_id, text)
+            elif msg.get("type") == "npc_chat" and engine:
+                npc_id = msg.get("npc_id", "")
+                player_message = msg.get("message", "")
+                chat_history = msg.get("history", [])
+                if npc_id and player_message and engine.player_state:
+                    npc_chat_queue: asyncio.Queue = asyncio.Queue()
+
+                    def npc_chat_stream_callback(token):
+                        loop.call_soon_threadsafe(npc_chat_queue.put_nowait, token)
+
+                    async def npc_chat_consumer():
+                        while True:
+                            try:
+                                token = await asyncio.wait_for(npc_chat_queue.get(), timeout=120.0)
+                            except asyncio.TimeoutError:
+                                break
+                            if token is None:
+                                try:
+                                    await websocket.send_text(
+                                        json.dumps({"type": "npc_chat_end"}, ensure_ascii=False)
+                                    )
+                                except Exception:
+                                    pass
+                                break
+                            else:
+                                try:
+                                    await websocket.send_text(
+                                        json.dumps({"type": "npc_chat_token", "token": token}, ensure_ascii=False)
+                                    )
+                                except Exception:
+                                    pass
+
+                    npc_consumer_task = asyncio.ensure_future(npc_chat_consumer())
+                    try:
+                        result = await asyncio.to_thread(
+                            engine.npc_chat, npc_id, player_message, chat_history,
+                            npc_chat_stream_callback
+                        )
+                    finally:
+                        await npc_chat_queue.put(None)
+                    try:
+                        await asyncio.wait_for(npc_consumer_task, timeout=5)
+                    except asyncio.TimeoutError:
+                        npc_consumer_task.cancel()
+                        logger.warning("npc_chat_consumer did not finish in 5s, cancelled")
+                    npc_consumer_task = None
+                    await websocket.send_text(json.dumps({
+                        "type": "npc_chat_result",
+                        "result": result,
+                    }, ensure_ascii=False))
     except WebSocketDisconnect:
         logger.info("WebSocket client %s disconnected", client_id)
     except Exception as e:

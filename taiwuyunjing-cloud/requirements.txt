@@ -1,0 +1,18 @@
+# 太虚幻境 云服务版
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+websockets>=12.0
+openai>=1.30.0
+chromadb>=0.5.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+aiofiles>=23.0.0
+python-docx>=1.1.0
+python-multipart>=0.0.9
+pycryptodome>=3.20.0
+aiosqlite>=0.20.0
+networkx>=3.0
+tenacity>=8.2.0
+# 云服务版新增
+PyJWT>=2.8.0
+bcrypt>=4.1.0

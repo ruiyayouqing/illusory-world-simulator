@@ -566,7 +566,7 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         # 蝴蝶效应审批门配置
         ba_cfg = v10_cfg.get("butterfly_approval_gate", {})
         if self.butterfly:
-            self.butterfly.approval_gate_enabled = ba_cfg.get("enabled", False)
+            self.butterfly.approval_gate_enabled = ba_cfg.get("enabled", True)
             self.butterfly.approval_threshold = ba_cfg.get("threshold", 7.0)
 
         # [v10+++] 多智能体分工叙事配置（Agents' Room 式）
@@ -1035,6 +1035,57 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
 
         return result
 
+    def undo_last_turn(self) -> dict:
+        """[v11] 撤销最后一次玩家行动及AI回复，从后端状态中彻底移除。"""
+        if not self.narrative_history:
+            return {"success": False, "error": "没有可撤销的历史记录"}
+
+        removed_count = 0
+        # 从 narrative_history 末尾移除：先移除可能的 event 条目，再移除 narrative 条目
+        # 注意：一次回合可能产生 1-2 条记录（narrative + 可选的 event）
+        while self.narrative_history:
+            last = self.narrative_history[-1]
+            # 移除最后一条 narrative（含 player_input）及其关联的 event
+            if last.get("type") == "narrative":
+                self.narrative_history.pop()
+                removed_count += 1
+                break
+            elif last.get("type") == "event":
+                # 检查是否为回合产生的世界事件（非自动事件）
+                # 自动事件通常没有 player_input 关联
+                self.narrative_history.pop()
+                removed_count += 1
+                # 继续循环，移除关联的 narrative 条目
+                continue
+            else:
+                break
+
+        # 撤销蝴蝶效应记录
+        if self.butterfly and self.butterfly.player_actions_history:
+            self.butterfly.player_actions_history.pop()
+            # 同步移除审批历史中对应回合的记录
+            if self.butterfly.pending_approvals:
+                self.butterfly.pending_approvals.pop()
+
+        # 回合数回退
+        if self.meta and self.meta.current_turn > 0:
+            self.meta.current_turn -= 1
+
+        # 标记需要全量重写 JSONL，确保磁盘上的记录也被移除
+        self._narrative_compressed = True
+        self._persisted_narrative_count = len(self.narrative_history)
+
+        # 持久化到磁盘
+        try:
+            self.save_state()
+            logger.info("Undo: removed %d entries from narrative_history, %d remaining",
+                        removed_count, len(self.narrative_history))
+        except Exception as e:
+            logger.error("Undo save failed: %s", e)
+            return {"success": False, "error": f"撤销后保存失败: {e}"}
+
+        return {"success": True, "removed": removed_count, "remaining": len(self.narrative_history)}
+
     def _classify_action_type(self, player_input: str, narrative: str) -> str:
         text = (player_input + " " + narrative).lower()
         if any(kw in text for kw in ["战斗", "攻击", "杀", "打", "战", "剑", "刀", "拳", "武", "对战", "厮杀"]):
@@ -1052,6 +1103,134 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         if any(kw in text for kw in ["休息", "睡觉", "歇", "安歇", "入眠", "养神", "静坐"]):
             return "rest"
         return "other"
+
+    def npc_chat(self, npc_id: str, player_message: str, chat_history: list = None, stream_callback=None) -> dict:
+        """
+        NPC 聊天接口：让玩家以"上帝视角"与任意 NPC 对话。
+        不影响游戏回合、状态或剧情，仅会话内保存聊天记录。
+
+        参数：
+            npc_id: NPC 的 agent_id
+            player_message: 玩家的消息
+            chat_history: 之前的聊天历史，格式为 [{"role": "user/assistant", "content": "..."}]
+            stream_callback: 可选，流式回调函数，每收到一个 token 就调用一次
+
+        返回：
+            {"success": bool, "message": str, "error": str}
+        """
+        if not self.llm:
+            return {"success": False, "message": "", "error": "LLM 未初始化"}
+
+        chat_history = chat_history or []
+
+        if npc_id == "player":
+            npc_name = self.player_state.name if self.player_state else "主角"
+            npc_personality = ""
+            npc_role = ""
+            npc_background = ""
+            npc_recent_actions = []
+            npc_relation = "玩家自己"
+            npc_location = resolve_location_name(self.player_state.location, self.world_state) if self.player_state else ""
+        else:
+            npc_state = self.npc_states.get(npc_id) if self.npc_states else None
+            if not npc_state:
+                return {"success": False, "message": "", "error": f"NPC 不存在: {npc_id}"}
+
+            npc_name = npc_state.name
+            npc_personality = npc_state.personality
+            npc_role = npc_state.role
+            npc_background = "\n".join([rh.get("description", "") for rh in npc_state.role_history[:3]])
+            npc_recent_actions = npc_state.recent_actions[-3:]
+            npc_relation = npc_state.relation_to_player.description if npc_state.relation_to_player else "陌生人"
+            npc_location = resolve_location_name(npc_state.current_location, self.world_state)
+
+        world_name = self.world_def.get("world_name", "") if self.world_def else ""
+        world_type = self.world_state.world_type if self.world_state else "custom"
+
+        recent_actions_str = ""
+        if npc_recent_actions:
+            recent_actions_str = "\n".join([f"- {a.get('action', '')}" for a in npc_recent_actions])
+
+        system_prompt = f"""
+你是角色扮演游戏中的 NPC「{npc_name}」。请以这个角色的身份与玩家对话。
+
+【世界信息】
+世界名称：{world_name}
+世界类型：{world_type}
+
+【你的身份】
+姓名：{npc_name}
+身份：{npc_role}
+性格：{npc_personality if npc_personality else "温和友善"}
+与玩家关系：{npc_relation}
+当前位置：{npc_location}
+
+【你的经历】
+{npc_background if npc_background else "暂无特殊经历"}
+
+【最近行动】
+{recent_actions_str if recent_actions_str else "暂无记录"}
+
+【核心规则】
+1. 你只知道自己的经历和世界设定，不知道其他 NPC 的秘密
+2. 你不能回答超出你角色知识范围的问题
+3. 如果玩家问你不知道的事情，如实回答"我不知道"或"这我不清楚"
+4. 不要打破第四面墙，不要提及你是 AI
+5. 你的回答要符合你的性格设定
+6. 回答要自然、简短，像日常对话一样，不要长篇大论
+7. 如果玩家是在与主角聊天（npc_id=player），你就是主角本人，用第一人称回答
+
+【示例】
+玩家：你最近在忙什么？
+你：最近一直在修炼剑法，希望能早日突破瓶颈。
+"""
+
+        messages = [{"role": "system", "content": system_prompt}]
+        for msg in chat_history[-10:]:
+            messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+        messages.append({"role": "user", "content": player_message})
+
+        try:
+            if stream_callback and hasattr(self.llm, "chat_stream"):
+                prompt_parts = []
+                for m in messages:
+                    role_name = m["role"]
+                    if role_name == "system":
+                        role_name = "系统"
+                    elif role_name == "user":
+                        role_name = "玩家"
+                    elif role_name == "assistant":
+                        role_name = npc_name
+                    prompt_parts.append(f"【{role_name}】\n{m['content']}")
+                full_prompt = "\n\n".join(prompt_parts) + f"\n\n【{npc_name}】\n"
+                
+                full_message = ""
+                token_gen = self.llm.chat_stream(full_prompt, temperature=0.7, max_tokens=500)
+                for token in token_gen:
+                    if token:
+                        full_message += token
+                        try:
+                            stream_callback(token)
+                        except Exception:
+                            pass
+                return {"success": True, "message": full_message, "error": ""}
+            else:
+                prompt_parts = []
+                for m in messages:
+                    role_name = m["role"]
+                    if role_name == "system":
+                        role_name = "系统"
+                    elif role_name == "user":
+                        role_name = "玩家"
+                    elif role_name == "assistant":
+                        role_name = npc_name
+                    prompt_parts.append(f"【{role_name}】\n{m['content']}")
+                full_prompt = "\n\n".join(prompt_parts) + f"\n\n【{npc_name}】\n"
+                result = self.llm.chat(full_prompt, temperature=0.7, max_tokens=500)
+                return {"success": True, "message": result or "", "error": ""}
+        except Exception as e:
+            logger.error("NPC chat failed: %s", e)
+            return {"success": False, "message": "", "error": str(e)}
 
     def _update_npc_impressions(self, player_input: str, narrative: str):
         """

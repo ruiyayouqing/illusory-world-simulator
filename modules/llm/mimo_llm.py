@@ -639,25 +639,39 @@ class MimoLLM(BaseLLM):
 
         # 第二阶段：回退到仅用 prompt 约束（chat + _parse_json）
         try:
-            # 世界生成 JSON 很长，不能复用普通对话 30 秒超时，否则新模型容易刚开始输出就被截断。
+            # 世界生成 JSON 很长，使用流式请求避免整体超时。
+            # [Bugfix] 同步请求的 timeout 是整个生成的上限，32768 tokens 首次调用
+            # (冷启动/排队) 容易超过 180s；流式只要持续有 token 返回就不会超时。
             if schema_name == "world":
                 start_time = time.time()
-                response = self.client.chat.completions.create(
+                stream = self.client.chat.completions.create(
                     model=self.model_name,
                     messages=[{"role": "user", "content": structured_prompt}],
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    stream=True,
                     timeout=request_timeout,
                 )
-                choice = response.choices[0] if response.choices else None
-                raw = choice.message.content if choice and choice.message else ""
+                raw_parts: list[str] = []
+                finish_reason = None
+                for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        raw_parts.append(chunk.choices[0].delta.content)
+                    if chunk.choices and chunk.choices[0].finish_reason:
+                        finish_reason = chunk.choices[0].finish_reason
+                raw = "".join(raw_parts)
                 latency = (time.time() - start_time) * 1000
-                p_tok, c_tok, ch_tok = self._extract_usage(response)
-                self.stats.record_call(p_tok, c_tok, ch_tok, latency)
+                # 流式响应无 usage，按字符数粗略估算 tokens
+                est_tokens = len(raw) // 3
+                self.stats.record_call(0, est_tokens, 0, latency)
                 self.last_usage = type(self.last_usage)(
-                    prompt_tokens=p_tok, completion_tokens=c_tok,
-                    cache_hit_tokens=ch_tok, latency_ms=latency, model=self.model_name
+                    prompt_tokens=0, completion_tokens=est_tokens,
+                    cache_hit_tokens=0, latency_ms=latency, model=self.model_name
                 )
+                logger.info("World gen stream done: %d chars, finish_reason=%s, %.1fs",
+                            len(raw), finish_reason, latency / 1000)
+                if not raw.strip():
+                    logger.warning("World gen stream returned empty, finish_reason=%s", finish_reason)
             else:
                 raw = self.chat(structured_prompt, temperature=temperature, max_tokens=max_tokens)
             result = self._parse_json(raw)
@@ -668,10 +682,10 @@ class MimoLLM(BaseLLM):
                     return result
                 logger.warning("Fallback validation failed: %s", err)
                 return result  # 返回即使不完美，避免完全失败
-            return result or {}
+            return result or {"error": "解析失败"}
         except Exception as e:
             logger.error("Structured output completely failed: %s", e)
-            return {}
+            return {"error": str(e)}
 
     def chat_stream(self, prompt: str | list[dict], temperature: float = 0.8,
                     max_tokens: int = 0) -> Generator[str, None, None]:

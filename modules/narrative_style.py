@@ -98,7 +98,7 @@ class NarrativeStyleManager:
         if world_style and (world_style == "自定义" or self.get_style_description(world_style)):
             return world_style
         config = self._load_config()
-        return config.get("game", {}).get("narrative_style", "章回体")
+        return config.get("game", {}).get("narrative_style", "网文爽文")
 
     def get_style_instruction(self, world_style: str = "") -> str:
         """
@@ -117,20 +117,20 @@ class NarrativeStyleManager:
             custom_text = config.get("game", {}).get("narrative_style_custom", "")
             if custom_text:
                 return f"【写作风格要求】\n{custom_text}"
-            # 自定义但没有文本，回退到章回体
-            style_name = "章回体"
+            # 自定义但没有文本，回退到网文爽文
+            style_name = "网文爽文"
 
         description = self.get_style_description(style_name)
         if not description:
-            # 找不到风格，使用章回体作为默认
-            description = BUILTIN_STYLES["章回体"]
-            style_name = "章回体"
+            # 找不到风格，使用网文爽文作为默认
+            description = BUILTIN_STYLES["网文爽文"]
+            style_name = "网文爽文"
 
         result = f"【写作风格：{style_name}】\n{description}"
 
         # [Bug] 叙事视角：统一人称，避免混用
         config = self._load_config()
-        perspective = config.get("game", {}).get("narrative_perspective", "second")
+        perspective = config.get("game", {}).get("narrative_perspective", "third")
         perspective_map = {
             "first": "【叙事视角：第一人称】\n叙事中统一使用「我」来指代玩家，如「我走进了大殿」、「我拔出剑」。禁止使用玩家姓名或「你」。",
             "second": "【叙事视角：第二人称】\n叙事中统一使用「你」来指代玩家，如「你走进了大殿」、「你拔出剑」。禁止使用玩家姓名代替「你」。",

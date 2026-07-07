@@ -1,0 +1,43 @@
+# 太虚幻境 云服务版 .gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+env/
+.venv/
+
+# 敏感文件（不可提交）
+config.json
+.jwt_secret
+.access_token
+.secret_key
+*.db
+*.sqlite
+*.sqlite3
+
+# 运行时目录
+saves/
+static/images/
+data/user_data/
+data/users.db
+
+# 日志
+*.log
+
+# 打包
+dist/
+build/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db

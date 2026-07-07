@@ -851,14 +851,24 @@ class PlayerAgent(BaseAgent):
             f"地点：{current_location}\n"
             f"时间：第{current_day}天，{current_time}\n"
             f"在场人物：{', '.join(present_npcs) if present_npcs else '仅有主角'}\n"
-            f"主角状态：{state.name}（{state.social.position}），健康={state.stats.health if state.stats else 100}\n"
+            f"主角状态：{state.name}（{state.social.position}），健康={state.stats.health if state.stats else 100}，"
+            f"力量={getattr(state.stats, 'strength', 5)}，敏捷={getattr(state.stats, 'agility', 5)}，"
+            f"智力={getattr(state.stats, 'intelligence', 5)}，幸运={getattr(state.stats, 'luck', 5)}\n"
             f"{recent_context}"
             f"\n【主角刚执行的行动】\n{player_input}\n"
             f"\n【本轮生成的叙事（最后500字）】\n{narrative_tail[-500:]}\n"
             f"\n【叙事最后一句】\n{last_paragraph}\n"
-            f"\n【任务】根据叙事最后一句的场景，生成3个后续行动选项。\n"
+            f"\n【任务】根据叙事最后一句的场景，生成3个后续行动选项，并判断玩家本次行动是否需要骰子判定。\n"
             f"\n【步骤一：分析叙事结尾】先回答：叙事最后发生了什么？谁在场？有什么未完成的动作或对话？\n"
-            f"【步骤二：生成选项】每个选项必须直接回应步骤一的答案。\n"
+            f"\n【步骤二：骰子判定】判断玩家本次行动「{player_input}」是否需要骰子判定。\n"
+            f"判定规则：\n"
+            f"- 当玩家行动有不确定性、有失败风险、或属于危险/作死行为时，需要骰子判定\n"
+            f"- 当玩家选择 risk=high 的危险选项，或玩家自定义输入被判定为危险/高风险时，必须需要骰子判定\n"
+            f"- 当行动是日常对话、休息、观察等无风险行为时，不需要骰子判定\n"
+            f"- stat 用于判定的属性名（strength/agility/intelligence/luck）\n"
+            f"- difficulty 难度值（5-20），行动越危险难度越高\n"
+            f"- 玩家属性+幸运加成+骰子点数 >= difficulty 时成功\n"
+            f"\n【步骤三：生成选项】每个选项必须直接回应步骤一的答案。\n"
             f"\n【铁律 - 违反则作废】\n"
             f"1. 选项必须紧接叙事最后一句的局面，不能跳到其他场景\n"
             f"2. 如果叙事最后有人对主角说话，至少一个选项必须是回应这个人\n"
@@ -871,7 +881,9 @@ class PlayerAgent(BaseAgent):
             f"选项应是「夸赞花无缺的手艺，让她再烤一盘」而不是「去厨房看看」\n"
             f"【坏选项示例】叙事最后「众人在宴会上欢笑」→ 「去草坪转转」是坏选项，因为主角还在宴会上\n"
             f"\n请输出JSON：\n"
-            f'{{"analysis":"叙事结尾分析（一句话）","options":[{{"id":"A","text":"选项描述","type":"action","risk":"low/medium/high"}},'
+            f'{{"analysis":"叙事结尾分析（一句话）",'
+            f'"dice_check":{{"needed":false,"stat":"strength","difficulty":10,"reason":"判定原因"}},'
+            f'"options":[{{"id":"A","text":"选项描述","type":"action","risk":"low/medium/high"}},'
             f'{{"id":"B","text":"选项描述","type":"action","risk":"low/medium/high"}},'
             f'{{"id":"C","text":"选项描述","type":"action","risk":"low/medium/high"}}]}}\n'
         )
