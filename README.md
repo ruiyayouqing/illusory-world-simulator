@@ -35,6 +35,14 @@
 ---
 
 <p align="center">
+  <img src="screenshots/npc_chat.png" alt="NPC角色聊天" width="90%">
+</p>
+
+**NPC 角色聊天**：在游戏主界面右侧的聊天面板中，与任意 NPC 进行深度对话，了解他们的故事和想法。纯对话模式，不影响世界状态。
+
+---
+
+<p align="center">
   <img src="screenshots/world_creation.png" alt="世界创建" width="60%">
 </p>
 
