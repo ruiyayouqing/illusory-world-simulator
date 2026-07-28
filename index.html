@@ -8,11 +8,11 @@
      In Alpine v3.15+, alpine:init fires synchronously during Alpine.start()
      which runs immediately after the Alpine script executes (defer order is
      preserved, but the listener must exist before the event is dispatched). -->
-<script defer src="/js/alpine-components.js?v=6"></script>
+<script defer src="/js/alpine-components.js?v=10"></script>
 <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
 <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
 <title>太虚幻境 - 虚拟世界人生模拟器</title>
-<link rel="stylesheet" href="/css/style.css?v=10">
+<link rel="stylesheet" href="/css/style.css?v=22">
 <style>
 .toast-success { background: linear-gradient(135deg, rgba(46,125,50,0.95), rgba(56,142,60,0.95)); color: white; }
 .toast-error { background: linear-gradient(135deg, rgba(198,40,40,0.95), rgba(211,47,47,0.95)); color: white; }
@@ -26,38 +26,285 @@
 <div id="bg-vignette"></div>
 
 <div id="home">
-<div class="logo">太虚幻境</div>
-<div class="sub">虚拟世界人生模拟器 · 无限世界文字推演</div>
-<div class="hbox">
-<h2>创建新世界</h2>
-<div class="fg"><label>世界类型</label><select id="wt" onchange="onWorldTypeChange()"><option value="custom">自定义世界</option><option value="historical">历史穿越</option><option value="fantasy">奇幻冒险</option><option value="scifi">科幻未来</option><option value="postapocalyptic">末日生存</option><option value="wuxia">武侠江湖</option><option value="xianxia">修仙问道</option><option value="modern">现代生活</option><option value="urban_fantasy">都市异能</option></select></div>
-<div id="goldenFingerSection" style="display:none;margin:-8px 0 16px;padding:14px 16px;background:linear-gradient(135deg, rgba(212,175,55,.12), rgba(212,175,55,.05));border:1px solid rgba(212,175,55,.35);border-radius:10px">
-<label style="font-size:.9em;color:var(--text-bright);display:flex;align-items:center;gap:10px;cursor:pointer">
-<input type="checkbox" id="goldenFinger" style="width:auto"> ✨ 开启金手指（系统面板/超能力/现代物品具现化等）
-</label>
-<div id="gfDesc" style="font-size:.8em;color:var(--dim);margin-top:8px;line-height:1.5;padding-left:30px">关闭后，AI将严格遵循历史/现实逻辑，拒绝任何超自然元素。玩家尝试使用金手指时，系统会给出合理否定。</div>
+<div class="home-cards-wrap">
+<div class="home-cards">
+<div class="home-card card-blue" onclick="showCreateWorld()">
+<div class="home-card-icon">
+<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+<circle cx="32" cy="32" r="28" stroke="url(#blueGrad)" stroke-width="2"/>
+<circle cx="32" cy="32" r="20" stroke="url(#blueGrad)" stroke-width="1.5" opacity="0.6"/>
+<path d="M32 12L36 28L52 32L36 36L32 52L28 36L12 32L28 28L32 12Z" fill="url(#blueGrad)" opacity="0.9"/>
+<circle cx="32" cy="32" r="6" fill="url(#blueGrad)"/>
+<path d="M8 32H16M48 32H56M32 8V16M32 48V56" stroke="url(#blueGrad)" stroke-width="2" stroke-linecap="round"/>
+<defs>
+<linearGradient id="blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+<stop offset="0%" stop-color="#70d0ff"/>
+<stop offset="100%" stop-color="#5090d0"/>
+</linearGradient>
+</defs>
+</svg>
 </div>
-<div class="fg"><label>描述你想要的世界</label><textarea id="wd" placeholder="例：穿越到明朝永乐年间，成为落魄书生" rows="3"></textarea></div>
-<div style="display:flex;gap:8px;margin-top:-8px;margin-bottom:14px">
-<button onclick="document.getElementById('fileInput').click()" class="upload-btn">📎 上传设定文件(.txt/.docx)</button>
-<input type="file" id="fileInput" accept=".txt,.docx" style="display:none" onchange="handleFileUpload(this)">
-<span id="fileInfo" style="color:var(--gold);font-size:.82em;line-height:32px"></span>
+<div class="home-card-title">创建新世界</div>
+<div class="home-card-divider"></div>
+<div class="home-card-desc">从零生成规则、人物与<br>世界背景</div>
 </div>
-<div style="margin-bottom:14px;padding:10px 12px;background:rgba(212,175,55,.06);border:1px solid rgba(212,175,55,.2);border-radius:8px">
-  <div style="font-size:.88em;color:var(--gold);margin-bottom:8px">📚 世界书（可选）</div>
-  <div style="display:flex;gap:8px;align-items:center">
-    <button onclick="document.getElementById('lorebookFileInput').click()" style="padding:7px 14px;background:rgba(212,175,55,.15);border:1px solid rgba(212,175,55,.3);border-radius:6px;color:var(--gold);font-weight:500;font-size:.85em;cursor:pointer">上传世界书</button>
-    <input type="file" id="lorebookFileInput" accept=".json" style="display:none" onchange="handleLorebookUpload(this)">
-    <span id="lorebookFileInfo" style="color:var(--dim);font-size:.82em"></span>
+<div class="home-card card-gold" onclick="showNovelRoleplay()">
+<div class="home-card-icon">
+<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M16 20L32 12L48 20V44L32 52L16 44V20Z" stroke="url(#goldGrad)" stroke-width="2" fill="rgba(212,175,55,0.15)"/>
+<path d="M32 12V52M16 20L32 28L48 20" stroke="url(#goldGrad)" stroke-width="1.5"/>
+<path d="M22 28L32 33L42 28M22 36L32 41L42 36" stroke="url(#goldGrad)" stroke-width="1.5" opacity="0.7"/>
+<path d="M24 48L32 44L40 48" stroke="url(#goldGrad)" stroke-width="1.5" opacity="0.5"/>
+<defs>
+<linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+<stop offset="0%" stop-color="#f8e080"/>
+<stop offset="100%" stop-color="#e0c040"/>
+</linearGradient>
+</defs>
+</svg>
+</div>
+<div class="home-card-title">现有小说角色扮演</div>
+<div class="home-card-divider"></div>
+<div class="home-card-desc">导入小说，进入既定命运分支</div>
+</div>
+<div class="home-card card-dark" onclick="showLoadSave()">
+<div class="home-card-icon">
+<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect x="14" y="16" width="36" height="36" rx="4" stroke="url(#darkGrad)" stroke-width="2"/>
+<rect x="20" y="10" width="24" height="8" rx="2" stroke="url(#darkGrad)" stroke-width="2"/>
+<path d="M22 28H42M22 36H42M22 44H34" stroke="url(#darkGrad)" stroke-width="2" stroke-linecap="round"/>
+<circle cx="44" cy="20" r="6" fill="url(#darkGrad)" opacity="0.9"/>
+<path d="M42 20L44 22L48 18" stroke="#0d0c0f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+<defs>
+<linearGradient id="darkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+<stop offset="0%" stop-color="#d0b070"/>
+<stop offset="100%" stop-color="#a08050"/>
+</linearGradient>
+</defs>
+</svg>
+</div>
+<div class="home-card-title">加载存档</div>
+<div class="home-card-divider"></div>
+<div class="home-card-desc">继续上次未完成的人生轨迹</div>
+</div>
+</div>
+</div>
+<div class="home-footer-links">
+<span class="home-footer-link" onclick="openSettings()">⚙️ 设置</span>
+<span class="home-footer-divider">·</span>
+<span class="home-footer-link" onclick="openDisclaimer()">📋 免责声明</span>
+</div>
+</div>
+
+<!-- 创建新世界页面 -->
+<div id="createWorldPage" style="display:none">
+<div class="subpage-header">
+<button onclick="backToHome()" class="subpage-back">←</button>
+<div class="subpage-title-wrap">
+  <h2 class="subpage-title"><span class="subpage-title-icon">✦</span> 创建新世界</h2>
+  <div class="subpage-subtitle">从零开始，书写你的传奇篇章</div>
+</div>
+</div>
+
+<div class="gold-panel">
+  <div class="gold-fg">
+    <label class="gold-fg-label">世界类型</label>
+    <select id="wt" class="gold-select" onchange="onWorldTypeChange()">
+      <option value="custom">自定义世界</option>
+      <option value="historical">历史穿越</option>
+      <option value="fantasy">奇幻冒险</option>
+      <option value="scifi">科幻未来</option>
+      <option value="postapocalyptic">末日生存</option>
+      <option value="wuxia">武侠江湖</option>
+      <option value="xianxia">修仙问道</option>
+      <option value="modern">现代生活</option>
+      <option value="urban_fantasy">都市异能</option>
+    </select>
   </div>
-  <div style="font-size:.78em;color:var(--dim);margin-top:6px">上传世界书后，生成的世界将遵循世界书设定。支持 SillyTavern World Info 格式。</div>
 </div>
-<button class="btn" onclick="createWorld()">✨ 生成世界并开始冒险</button>
-<div class="settings-link"><span onclick="openSettings()">⚙️ 设置（API Key / 主题 / 文生图）</span></div>
-<div class="div">─── 或加载存档 ───</div>
-<div class="slist" id="slist"><div style="color:#5a4a3a;text-align:center;padding:12px">暂无存档</div></div>
+
+<div class="gold-panel gold-panel-accent">
+  <label class="gold-check-row">
+    <input type="checkbox" id="goldenFinger" checked>
+    <div>
+      <div class="gold-check-text">✦ 开启金手指 <span style="opacity:.6;font-weight:400">（系统面板/超能力/现代物品具现化等）</span></div>
+      <div class="gold-check-desc">关闭后，AI将严格遵循该世界的既有设定，不允许超出设定的元素。</div>
+    </div>
+  </label>
+</div>
+
+<div class="gold-panel">
+  <div class="gold-fg">
+    <label class="gold-fg-label">描述你想要的世界</label>
+    <textarea id="wd" class="gold-textarea" placeholder="✒ 例：穿越到明朝永乐年间，成为落魄书生" rows="3"></textarea>
+    <div style="margin-top:10px;display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap">
+      <button onclick="try{openWorldviewModal()}catch(e){alert('Error: '+e.message)}" class="gold-btn-outline gold-btn-outline-blue">🧠 AI世界观（可选）</button>
+      <button onclick="showPresetWorlds()" class="gold-btn-outline">📋 预设开局</button>
+    </div>
+  </div>
+</div>
+
+<div class="gold-panel">
+  <div class="gold-row" style="margin-bottom:14px">
+    <button onclick="document.getElementById('fileInput').click()" class="gold-btn-outline">📎 上传设定文件 <span style="opacity:.6">(txt / docx)</span></button>
+    <input type="file" id="fileInput" accept=".txt,.docx" style="display:none" onchange="handleFileUpload(this)">
+    <span id="fileInfo" style="color:var(--gold);font-size:.85em;line-height:32px"></span>
+  </div>
+  <div class="gold-section-title"><span class="icon">📚</span>世界书 <span style="opacity:.5;font-weight:400;font-size:.85em">（可选）</span></div>
+  <div class="gold-row">
+    <button onclick="document.getElementById('lorebookFileInput').click()" class="gold-btn-outline">上传世界书</button>
+    <input type="file" id="lorebookFileInput" accept=".json" style="display:none" onchange="handleLorebookUpload(this)">
+    <span id="lorebookFileInfo" class="gold-hint" style="margin:0"></span>
+  </div>
+  <div class="gold-hint" style="margin-top:8px">上传世界书后，生成的世界将遵循世界书设定。支持 SillyTavern World Info 格式。</div>
+</div>
+
+<button class="gold-btn-primary" onclick="createWorld()">✦ 生成世界并开始冒险</button>
+</div>
+
+<!-- 加载存档页面 -->
+<div id="loadSavePage" style="display:none">
+<div class="subpage-header">
+<button onclick="backToHome()" class="subpage-back">←</button>
+<div class="subpage-title-wrap">
+  <h2 class="subpage-title"><span class="subpage-title-icon">✦</span> 加载存档</h2>
+  <div class="subpage-subtitle">继续你未完成的人生轨迹</div>
+</div>
+</div>
+<div class="slist" id="slist"><div style="color:rgba(180,170,150,.6);text-align:center;padding:32px">暂无存档</div></div>
 <div class="view-history-btn"><span onclick="openViewHistory()">📖 查看已有世界</span></div>
 </div>
+
+<!-- [v12] 小说人物扮演页面 -->
+<div id="novelRoleplayPage" style="display:none">
+  <div class="subpage-header">
+    <button id="nrTopBackBtn" onclick="backToHome()" class="subpage-back">←</button>
+    <button id="nrTopBackToCharBtn" onclick="backToCharacters()" class="subpage-back" style="display:none;left:54px">←</button>
+    <div class="subpage-title-wrap">
+      <h2 class="subpage-title"><span class="subpage-title-icon">✦</span> 小说人物扮演</h2>
+      <div class="subpage-subtitle">踏入书中世界，成为命运的主角</div>
+    </div>
+  </div>
+
+  <!-- 上传区域 -->
+  <div id="nrUploadSection">
+    <div class="gold-panel">
+      <div class="gold-section-title"><span class="icon">📖</span>第一步：导入小说</div>
+      <p class="gold-hint" style="margin-bottom:16px;margin-top:0">支持百万字以上的TXT小说文件。AI将自动理解人物关系、因果链条和剧情发展。</p>
+      <div class="gold-row" style="margin-bottom:14px">
+        <button onclick="document.getElementById('nrNovelFileInput').click()" class="gold-btn-outline">📎 选择小说文件</button>
+        <input type="file" id="nrNovelFileInput" accept=".txt" style="display:none" onchange="handleNovelFileUpload(this)">
+        <span id="nrFilePreview" class="gold-hint" style="margin:0"></span>
+      </div>
+      <div class="gold-fg" style="margin-top:12px">
+        <label class="gold-fg-label">小说名称 <span style="opacity:.5;font-weight:400">（可选）</span></label>
+        <input type="text" id="nrNovelName" placeholder="自动使用文件名" class="gold-input">
+      </div>
+
+      <!-- 耗时预估提示框 -->
+      <div id="nrTimeEstimate" style="display:none;margin-top:14px;padding:12px 16px;background:rgba(212,175,55,.08);border-left:3px solid var(--gold);border-radius:8px;font-size:.85em;color:#e0d5c0">
+        <div id="nrTimeEstimateText"></div>
+      </div>
+
+      <button class="gold-btn-primary" onclick="startNovelImport()" style="margin-top:16px">✦ 开始AI深度理解</button>
+
+      <!-- 静态说明 -->
+      <div class="gold-panel" style="margin-top:14px;margin-bottom:0;background:rgba(5,10,25,.4);border-color:rgba(212,175,55,.15)">
+        <div style="color:var(--gold);font-weight:500;margin-bottom:6px;font-size:.88em">⏱ 处理时长说明</div>
+        <div class="gold-hint" style="margin-top:0;line-height:1.8">
+          · 快速导入：约30秒，提取章节结构和主要角色<br>
+          · 深度处理：选定章节后处理，每10万字约1分钟<br>
+          · 只处理选定章节前的内容，节省处理时间<br>
+          · 处理完成后自动进入小说世界
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 处理进度区域 -->
+  <div id="nrProcessingSection" style="display:none">
+    <div class="gold-panel gold-processing">
+      <span class="emoji">🤖</span>
+      <h3 id="nrProgressMsg">AI正在深度理解小说...</h3>
+      <div class="nr-progress-wrap">
+        <div id="nrProgressBar" class="nr-progress-bar"></div>
+      </div>
+      <div id="nrProgressDetail" class="gold-hint"></div>
+    </div>
+  </div>
+
+  <!-- 角色选择区域 -->
+  <div id="nrCharactersSection" style="display:none">
+    <div class="gold-panel">
+      <div class="gold-section-title"><span class="icon">👤</span>第二步：选择你要扮演的角色</div>
+      <p class="gold-hint" style="margin-top:0">从小说中检测到的主要人物中，选择一个成为你。</p>
+    </div>
+    <div id="nrCharactersList" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;margin-bottom:20px"></div>
+    <button id="nrToTimelineBtn" class="gold-btn-primary" onclick="goToChapters()" disabled style="opacity:.4">✦ 下一步：选择章节 →</button>
+  </div>
+
+  <!-- 章节选择区域 [v12+] -->
+  <div id="nrChaptersSection" style="display:none">
+    <div class="gold-panel">
+      <div class="gold-section-title"><span class="icon">📑</span>第三步：选择进入的章节</div>
+      <p class="gold-hint" style="margin-top:0">选定章节后，AI会深度处理该章节之前的内容，之后为你的自由推演。</p>
+      <p id="nrSelectedCharDisplay" style="color:var(--gold);font-size:.9em;margin:8px 0 0"></p>
+      <p id="nrAutoSplitHint" style="display:none;color:var(--gold);font-size:.82em;margin:8px 0 0;background:rgba(212,175,55,.08);border-left:3px solid var(--gold);padding:8px 12px;border-radius:6px"></p>
+    </div>
+    <div id="nrChaptersList" style="max-height:500px;overflow-y:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-bottom:20px"></div>
+
+    <!-- [v12+] 备选入口：按进度 / 粘贴文字定位 -->
+    <div id="nrAltEntrySection" class="gold-panel nr-alt-section" style="margin-bottom:20px">
+      <div class="gold-row-between" style="margin-bottom:0">
+        <div style="color:#e0d5c0;font-size:.9em;font-weight:500">🎯 其他进入方式 <span style="opacity:.5;font-weight:400">（可选）</span></div>
+        <button onclick="toggleNrAltEntry()" id="nrAltToggleBtn" class="gold-btn-outline" style="font-size:.78em;padding:4px 12px">展开 ▼</button>
+      </div>
+      <div id="nrAltEntryBody" style="display:none">
+        <!-- 方案B：按进度 -->
+        <div class="gold-panel" style="margin-top:14px;margin-bottom:14px;background:rgba(5,10,25,.3);border-color:rgba(212,175,55,.2)">
+          <div class="gold-section-title" style="border:none;padding:0;margin-bottom:8px"><span class="icon">📊</span>按进度进入</div>
+          <div class="gold-hint" style="margin-top:0;margin-bottom:10px">输入百分比或字数，深度处理到该位置。</div>
+          <div class="gold-row">
+            <input type="number" id="nrProgressInput" placeholder="如 50（百分比）或 50000（字数）" min="1" class="gold-input" style="flex:1;min-width:180px">
+            <select id="nrProgressUnit" class="gold-select" style="width:auto;flex-shrink:0">
+              <option value="percent">百分比 %</option>
+              <option value="chars">字数</option>
+            </select>
+            <button onclick="startDeepProcessByProgress()" class="gold-btn-outline" style="white-space:nowrap">▶ 开始</button>
+          </div>
+        </div>
+        <!-- 方案C：粘贴文字定位 -->
+        <div class="gold-panel" style="margin-bottom:0;background:rgba(5,10,25,.3);border-color:rgba(212,175,55,.2)">
+          <div class="gold-section-title" style="border:none;padding:0;margin-bottom:8px"><span class="icon">📝</span>粘贴文字定位</div>
+          <div class="gold-hint" style="margin-top:0;margin-bottom:10px">粘贴小说原文片段（至少20字），AI会找到位置后深度处理该位置前内容。</div>
+          <textarea id="nrSnippetInput" placeholder="在此粘贴小说中的文字..." rows="3" class="gold-textarea"></textarea>
+          <div class="gold-row" style="margin-top:10px">
+            <button onclick="locateTextAndPreview()" class="gold-btn-outline gold-btn-outline-blue">🔍 查找位置</button>
+            <span id="nrLocateResult" class="gold-hint" style="margin:0"></span>
+          </div>
+          <button id="nrStartBySnippetBtn" onclick="startDeepProcessBySnippet()" disabled style="display:none;margin-top:12px" class="gold-btn-primary">✦ 确认并深度处理</button>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:12px">
+      <button id="nrStartDeepBtn" class="gold-btn-primary" onclick="startDeepProcess()" disabled style="opacity:.4">✦ 开始深度处理并进入</button>
+    </div>
+  </div>
+
+  <!-- 时间轴选择区域（保留兼容） -->
+  <div id="nrTimelineSection" style="display:none">
+    <div class="gold-panel">
+      <div class="gold-section-title"><span class="icon">⏳</span>第三步：选择进入的时间节点</div>
+      <p class="gold-hint" style="margin-top:0">该节点之前的剧情将作为既定历史保留，之后为你的自由推演。</p>
+      <p id="nrSelectedCharDisplayTL" style="color:var(--gold);font-size:.9em;margin:8px 0 0"></p>
+    </div>
+    <div id="nrTimelineList" style="max-height:500px;overflow-y:auto;margin-bottom:20px"></div>
+    <div style="display:flex;gap:12px">
+      <button class="gold-btn-outline" onclick="backToCharacters()" style="width:auto;padding:10px 20px">← 返回角色选择</button>
+      <button id="nrEnterGameBtn" class="gold-btn-primary" onclick="enterNovelRoleplay()" disabled style="opacity:.4;flex:1">✦ 进入小说世界</button>
+    </div>
+  </div>
 </div>
 
 <div id="game">
@@ -75,10 +322,10 @@
 <div class="sidebar-btn" onclick="openWhoIsWho()" title="名人谱">
 📜<span class="tooltip">名人谱</span>
 </div>
-<div class="sidebar-btn" onclick="openV10Panel()" title="v10面板">
-🔮<span class="tooltip">v10 面板</span>
+<div class="sidebar-btn" onclick="openV10Panel()" title="高级功能面板">
+🔮<span class="tooltip">高级功能面板</span>
 </div>
-<div class="sidebar-btn" onclick="openNpcPrediction()" title="NPC推演">
+<div class="sidebar-btn" onclick="openNpcPrediction()" title="NPC推演" style="display:none">
 🧠<span class="tooltip">NPC行动推演</span>
 </div>
 <div class="sidebar-spacer"></div>
@@ -92,8 +339,11 @@
 🎨<span class="tooltip">生成插图</span>
 </div>
 <div class="sidebar-spacer"></div>
-<div class="sidebar-btn" onclick="doAdvance()" title="推进时间">
+<div class="sidebar-btn" onclick="doAdvance()" title="推进时间" style="display:none">
 ⏭️<span class="tooltip">推进时间</span>
+</div>
+<div class="sidebar-btn" onclick="openAutoRunPanel()" title="自主运行N天">
+⏩<span class="tooltip">自主运行N天</span>
 </div>
 <div class="sidebar-btn" onclick="doSave()" title="存档">
 💾<span class="tooltip">手动存档</span>
@@ -113,6 +363,7 @@
 <span class="time-status" id="time_status_bar" style="display:none">📅 --</span>
 <span class="divergence" id="div_rate" style="display:none">🌐 <span id="drate">0</span>%</span>
 <button class="header-icon-btn" onclick="openContextDebug()" title="AI上下文调试">🧠</button>
+<button class="header-icon-btn" onclick="openCausalGraph()" title="因果链可视化">🔮</button>
 </div>
 </div>
 <div class="narr-body" id="nb"></div>
@@ -163,6 +414,16 @@
 
 <div class="sec"><h3>🤝 关系</h3><div id="srl"></div></div>
 
+<div class="sec" id="player_events_sec">
+<h3>🚪 来访事件 <span id="player_events_count" style="color:var(--dim);font-size:.8em"></span></h3>
+<div class="events-box" id="playerEventsBox"><div style="color:var(--dim);text-align:center;padding:10px;font-size:.78em">今日无人来访</div></div>
+</div>
+
+<div class="sec" id="world_events_sec">
+<h3>🌍 世界事件 <span id="world_events_count" style="color:var(--dim);font-size:.8em"></span></h3>
+<div class="events-box" id="worldEventsBox"><div style="color:var(--dim);text-align:center;padding:10px;font-size:.78em">天下太平</div></div>
+</div>
+
 <div class="sec"><h3>🗺️ 世界地图</h3>
 <div class="map-preview" id="map_preview" onclick="openMap()">
   <div class="map-preview-inner">
@@ -200,6 +461,7 @@
 <div class="abtn" onclick="openAddNpc()">➕ 添加角色</div>
 <div class="abtn" onclick="openEditNpc()">✏️ 修改角色</div>
 <div class="abtn" onclick="openOutputLog()">📋 输出汇总</div>
+<div class="abtn" onclick="toggleNpcChatPanel()">💬 角色聊天</div>
 </div>
 </div>
 
@@ -248,7 +510,9 @@
     <div style="display:flex;gap:8px;margin-top:8px">
       <input type="text" id="st_llm_pname" placeholder="配置名称" style="flex:1;padding:8px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
       <button onclick="saveProfile('llm')" style="padding:8px 16px;background:var(--gold);border:none;border-radius:8px;color:#0d0c0f;font-weight:700;font-size:.85em;cursor:pointer">存为配置</button>
+      <button onclick="testConnection('llm')" id="btn_test_llm" style="padding:8px 14px;background:rgba(110,169,201,.15);border:1px solid rgba(110,169,201,.4);border-radius:8px;color:#6ea9c9;font-size:.85em;cursor:pointer;white-space:nowrap">🔌 测试联通</button>
     </div>
+    <div id="test_result_llm" style="font-size:.8em;margin-top:6px;display:none;padding:8px 10px;border-radius:6px"></div>
   </div>
 
   <!-- ⚡ 廉价模型 -->
@@ -267,7 +531,9 @@
     <div style="display:flex;gap:8px;margin-top:8px">
       <input type="text" id="st_cheap_pname" placeholder="配置名称" style="flex:1;padding:8px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
       <button onclick="saveProfile('cheap')" style="padding:8px 16px;background:var(--gold);border:none;border-radius:8px;color:#0d0c0f;font-weight:700;font-size:.85em;cursor:pointer">存为配置</button>
+      <button onclick="testConnection('cheap')" id="btn_test_cheap" style="padding:8px 14px;background:rgba(110,169,201,.15);border:1px solid rgba(110,169,201,.4);border-radius:8px;color:#6ea9c9;font-size:.85em;cursor:pointer;white-space:nowrap">🔌 测试联通</button>
     </div>
+    <div id="test_result_cheap" style="font-size:.8em;margin-top:6px;display:none;padding:8px 10px;border-radius:6px"></div>
     <div style="font-size:.78em;color:var(--dim);margin-top:8px;padding:8px 10px;background:rgba(212,175,55,.05);border-radius:6px">💡 简单任务（分类/评分）优先用廉价模型；主模型失败时自动降级</div>
   </div>
 
@@ -304,7 +570,9 @@
     <div style="display:flex;gap:8px;margin-top:8px">
       <input type="text" id="st_img_pname" placeholder="配置名称" style="flex:1;padding:8px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
       <button onclick="saveProfile('image')" style="padding:8px 16px;background:var(--gold);border:none;border-radius:8px;color:#0d0c0f;font-weight:700;font-size:.85em;cursor:pointer">存为配置</button>
+      <button onclick="testConnection('image')" id="btn_test_image" style="padding:8px 14px;background:rgba(110,169,201,.15);border:1px solid rgba(110,169,201,.4);border-radius:8px;color:#6ea9c9;font-size:.85em;cursor:pointer;white-space:nowrap">🔌 测试联通</button>
     </div>
+    <div id="test_result_image" style="font-size:.8em;margin-top:6px;display:none;padding:8px 10px;border-radius:6px"></div>
   </div>
 
   <!-- 🔤 向量模型 -->
@@ -313,6 +581,10 @@
     <div class="fg"><label>API Key</label><input type="password" id="st_ek" x-model="config.embedding.api_key" placeholder="SiliconFlow API Key"></div>
     <div class="fg"><label>调用地址</label><input type="text" id="st_eu" x-model="config.embedding.base_url" placeholder="https://api.siliconflow.cn/v1"></div>
     <div class="fg"><label>模型</label><input type="text" id="st_em" x-model="config.embedding.model_name" placeholder="BAAI/bge-m3"></div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button onclick="testConnection('embedding')" id="btn_test_embedding" style="padding:8px 14px;background:rgba(110,169,201,.15);border:1px solid rgba(110,169,201,.4);border-radius:8px;color:#6ea9c9;font-size:.85em;cursor:pointer;white-space:nowrap">🔌 测试联通</button>
+    </div>
+    <div id="test_result_embedding" style="font-size:.8em;margin-top:6px;display:none;padding:8px 10px;border-radius:6px"></div>
     <div style="font-size:.78em;color:var(--dim);margin-top:8px;padding:8px 10px;background:rgba(212,175,55,.05);border-radius:6px">💡 用于记忆语义检索，推荐 BAAI/bge-m3（中英文双语，1024维）</div>
   </div>
 </div>
@@ -323,7 +595,7 @@
   <div class="settings-section">
     <div class="settings-section-title">写作风格</div>
     <div class="fg">
-      <select id="st_narrative_style" onchange="onStyleChange()" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
+      <select id="st_narrative_style" x-model="config.game.narrative_style" @change="onStyleChange()" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
         <option value="章回体">章回体 — 半文半白，《三言二拍》风格</option>
         <option value="半古半文">半古半文 — 文言句式+白话叙事</option>
         <option value="大白话">大白话 — 现代口语，轻松幽默</option>
@@ -350,12 +622,25 @@
   <div class="settings-section">
     <div class="settings-section-title">叙事视角</div>
     <div class="fg">
-      <select id="st_narrative_perspective" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
+      <select id="st_narrative_perspective" x-model="config.game.narrative_perspective" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
         <option value="second">第二人称 — "你"（沉浸感强，推荐）</option>
         <option value="third">第三人称 — 角色名（如"张立"、"凌云"）</option>
         <option value="first">第一人称 — "我"（内心独白感）</option>
       </select>
       <div style="font-size:.75em;color:var(--dim);margin-top:4px">统一叙事中的人称，避免混用"你"和角色名导致混乱。</div>
+    </div>
+  </div>
+
+  <!-- [v1.3] 小说模式叙事视角 -->
+  <div class="settings-section">
+    <div class="settings-section-title">小说角色扮演视角</div>
+    <div class="fg">
+      <select id="st_novel_perspective" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
+        <option value="third">第三人称 — 角色名（原著风格，默认）</option>
+        <option value="first">第一人称 — "我"（代入主角内心）</option>
+        <option value="second">第二人称 — "你"（沉浸式）</option>
+      </select>
+      <div style="font-size:.75em;color:var(--dim);margin-top:4px">小说角色扮演模式专用的叙事视角，默认第三人称贴合原著风格，可改为第一/第二人称。</div>
     </div>
   </div>
 
@@ -389,6 +674,12 @@
       </label>
       <div style="font-size:.75em;color:var(--dim);margin-top:4px">开启后，系统会用AI判断玩家行动是否与当前剧情/世界观矛盾，不合理时提示修改。需要配置备用AI模型。</div>
     </div>
+    <div class="fg" style="margin-top:8px">
+      <label style="font-size:.88em;color:var(--dim);display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="st_npc_private_facts"> 启用 NPC 私密档案（普通模式）
+      </label>
+      <div style="font-size:.75em;color:var(--dim);margin-top:4px">开启后，玩家首次与 NPC 对话时，系统会为该 NPC 生成 3-5 条私密事实（秘密/过往/好恶/心愿），用于丰富对话深度。小说模式默认启用。</div>
+    </div>
   </div>
 
   <!-- 固定提示词 -->
@@ -407,7 +698,7 @@
   <div class="settings-section">
     <div class="settings-section-title">主题风格</div>
     <div class="fg">
-      <select id="st_th" onchange="previewTheme()" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
+      <select id="st_th" x-model="config.ui.theme" @change="previewTheme()" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
         <option value="obsidian">深色 · 黑曜石（经典暗金）</option>
         <option value="midnight">深色 · 午夜蓝（静谧深邃）</option>
         <option value="crimson">深色 · 暗红（哥特神秘）</option>
@@ -595,6 +886,32 @@
 </div></div>
 
 <div class="modal" id="mov"><div class="modal-box"><span class="close" onclick="closeModal()">&times;</span><h2 id="mth"></h2><pre id="mtb"></pre></div></div>
+<div class="modal" id="autoRunModal"><div class="modal-box" style="width:760px;max-height:90vh;display:flex;flex-direction:column"><span class="close" onclick="closeAutoRun()">&times;</span><h2>⏩ 世界自主运行</h2>
+<div id="autoRunForm" style="margin-bottom:12px">
+  <div style="color:var(--dim);font-size:.88em;margin-bottom:10px;line-height:1.6">
+    让世界自我演化 N 天，期间 NPC 自主行动、主动接触主角，世界事件持续推进。
+    运行结束后自动汇总成一章小说。<br>运行前会自动存档，可放心尝试。
+  </div>
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+    <label>推进天数：</label>
+    <input type="number" id="autoRunDays" value="7" min="1" max="365" style="width:80px;padding:6px 8px;background:var(--bg-deep);border:1px solid var(--border);border-radius:6px;color:var(--text)">
+    <span style="color:var(--dim);font-size:.85em">建议 5-30 天</span>
+  </div>
+  <div style="display:flex;gap:10px">
+    <button onclick="startAutoRun()" style="padding:8px 18px;background:var(--gold);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:600">▶ 开始自主运行</button>
+    <button onclick="viewAutoRunChapters()" style="padding:8px 18px;background:transparent;color:var(--text);border:1px solid var(--border);border-radius:6px;cursor:pointer">📚 查看历史章节</button>
+  </div>
+</div>
+<div id="autoRunProgress" style="display:none;padding:20px;text-align:center">
+  <div style="font-size:1.05em;margin-bottom:10px" id="autoRunProgressText">正在自主运行...</div>
+  <div style="color:var(--dim);font-size:.88em" id="autoRunProgressHint">期间世界持续推演，NPC 自主行动。请耐心等待，不要关闭页面。</div>
+</div>
+<div id="autoRunResult" style="display:none;max-height:60vh;overflow-y:auto">
+  <div style="padding:10px 14px;background:rgba(212,175,55,.06);border:1px solid rgba(212,175,55,.2);border-radius:8px;margin-bottom:12px;font-size:.88em;color:var(--dim)" id="autoRunStats"></div>
+  <pre id="autoRunChapter" style="white-space:pre-wrap;font-family:inherit;line-height:1.85;color:var(--text);font-size:.95em"></pre>
+</div>
+<div id="autoRunChapterList" style="display:none;max-height:60vh;overflow-y:auto"></div>
+</div></div>
 <div class="modal" id="outputLogModal"><div class="modal-box" style="width:800px;max-height:88vh"><span class="close" onclick="closeOutputLog()">&times;</span><h2>📋 AI输出汇总</h2>
 <div id="outputLogContent" style="max-height:75vh;overflow-y:auto;font-size:.88em;line-height:1.7;color:var(--text)"></div>
 </div></div>
@@ -620,6 +937,27 @@
   <div id="mapDetailDesc" style="color:var(--dim);margin-bottom:6px"></div>
   <div id="mapDetailNpcs" style="color:var(--text)"></div>
 </div></div></div>
+
+<!-- [v1.3] 因果链可视化 modal -->
+<div class="modal" id="causalGraphModal"><div class="modal-box" style="width:1100px;max-width:96vw;height:90vh;display:flex;flex-direction:column;padding:20px 24px;overflow:hidden"><span class="close" onclick="closeCausalGraph()">&times;</span>
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-shrink:0;padding-right:64px">
+  <h2 style="margin:0">🔮 因果链可视化</h2>
+  <div style="display:flex;gap:8px;align-items:center">
+    <button onclick="loadCausalGraph()" class="gold-btn-outline" style="font-size:.78em;padding:5px 12px">刷新</button>
+    <button onclick="clearCausalGraph()" class="gold-btn-outline" style="font-size:.78em;padding:5px 12px">清空</button>
+  </div>
+</div>
+<div id="causalStats" style="flex-shrink:0;font-size:.8em;color:var(--dim);margin-bottom:8px;display:flex;gap:18px;flex-wrap:wrap"></div>
+<div style="display:flex;gap:10px;flex:1;min-height:0">
+  <div id="causalCanvas" style="flex:1;background:var(--bg-deep);border-radius:10px;border:1px solid var(--border);min-height:300px"></div>
+  <div id="causalDetail" style="width:300px;flex-shrink:0;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:.85em;overflow-y:auto;display:none">
+    <div id="causalDetailContent"></div>
+  </div>
+</div>
+<div style="flex-shrink:0;margin-top:8px;font-size:.78em;color:var(--dim);text-align:center">
+  节点颜色：<span style="color:#d44">●</span> 重大(≥10) <span style="color:#fa4">●</span> 重要(≥8) <span style="color:#4af">●</span> 普通 ｜ 点击节点查看详情
+</div>
+</div></div>
 
 <div class="modal" id="whoModal"><div class="modal-box" style="width:920px;max-width:95vw;height:88vh;display:flex;flex-direction:column"><span class="close" onclick="closeWhoIsWho()">&times;</span>
 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-shrink:0">
@@ -720,286 +1058,308 @@
      style="position:fixed;top:24px;left:50%;transform:translateX(-50%);z-index:10000;padding:14px 28px;border-radius:10px;font-weight:500;box-shadow:0 6px 24px rgba(0,0,0,0.4);"></div>
 
 <div id="loadingOverlay" style="position:fixed;inset:0;z-index:9999;display:none;align-items:center;justify-content:center;flex-direction:column;gap:20px">
-  <canvas id="nebulaCanvas" style="position:absolute;inset:0;width:100%;height:100%;z-index:0"></canvas>
+  <canvas id="loadingCanvas" style="position:absolute;inset:0;width:100%;height:100%;z-index:0"></canvas>
   <div class="loading-spinner" style="position:relative;z-index:1"></div>
   <div id="loadingText" style="color:var(--gold);font-size:1.1em;font-weight:600;letter-spacing:2px;position:relative;z-index:1;text-shadow:0 0 20px rgba(0,0,0,0.9),0 0 40px rgba(0,0,0,0.7)">加载中...</div>
   <div id="loadingStage" style="color:rgba(180,210,255,0.7);font-size:.92em;letter-spacing:1px;min-height:1.4em;transition:opacity .4s ease;position:relative;z-index:1;text-shadow:0 0 15px rgba(0,0,0,0.9)"></div>
 </div>
 
 <script>
-// ========== 星云加载动画 ==========
+// ========== 多彩粒子加载动画 ==========
 (function() {
-  var _nebulaCanvas = document.getElementById('nebulaCanvas');
-  var _nebulaCtx = _nebulaCanvas ? _nebulaCanvas.getContext('2d') : null;
-  var _nebulaRAF = null;
-  var _nebulaTime = 0;
-  var _nebulaStars = [];
-  var _nebulaDust = [];
-  var _nebulaClouds = [];
-  var _nebulaMeteors = [];
-  var _nebulaBlackHole = null;
+  var canvas = document.getElementById('loadingCanvas');
+  var ctx = canvas ? canvas.getContext('2d') : null;
+  var raf = null;
 
-  var NEBULA_NUM_STARS = 600;
-  var NEBULA_NUM_DUST = 200;
-  var NEBULA_METEOR_COUNT = 4;
+  var width, height;
 
-  var _starColors = [
-    {hue:30,sat:90,light:70},{hue:0,sat:80,light:75},{hue:200,sat:70,light:80},
-    {hue:220,sat:80,light:85},{hue:50,sat:80,light:75},{hue:280,sat:70,light:70},
-  ];
+  var mouse = {
+    x: 0,
+    y: 0,
+    attractRadius: 130,
+    explodeRadius: 30
+  };
 
-  function _nebulaInit() {
-    if (!_nebulaCanvas || !_nebulaCtx) return;
-    var W = _nebulaCanvas.width = window.innerWidth;
-    var H = _nebulaCanvas.height = window.innerHeight;
+  var particles = [];
+  var explosions = [];
+  var hue = 0;
 
-    _nebulaStars = [];
-    for (var i = 0; i < NEBULA_NUM_STARS; i++) {
-      var col = _starColors[Math.floor(Math.random() * _starColors.length)];
-      _nebulaStars.push({
-        x: Math.random() * W, y: Math.random() * (H * 0.55),
-        radius: 0.4 + Math.random() * 2.5, brightness: 0.3 + Math.random() * 0.7,
-        phase: Math.random() * Math.PI * 2, speed: 0.4 + Math.random() * 0.3,
-        hue: col.hue + (Math.random()-0.5)*20, sat: col.sat,
-        light: col.light + (Math.random()-0.5)*20,
-      });
-    }
+  var particleCount = 0;
 
-    _nebulaDust = [];
-    for (var i = 0; i < NEBULA_NUM_DUST; i++) {
-      _nebulaDust.push({
-        x: Math.random()*W, y: Math.random()*(H*0.6),
-        radius: 0.2+Math.random()*1.0,
-        vx: (Math.random()-0.5)*0.3, vy: (Math.random()-0.5)*0.2-0.05,
-        alpha: 0.1+Math.random()*0.3, phase: Math.random()*Math.PI*2,
-      });
-    }
-
-    _nebulaClouds = [];
-    for (var i = 0; i < 6; i++) {
-      _nebulaClouds.push({
-        x: Math.random()*W*0.8+W*0.1, y: Math.random()*(H*0.45)+H*0.05,
-        radius: 100+Math.random()*250,
-        hue1: 220+Math.random()*80, hue2: (280+Math.random()*100)%360,
-        alpha: 0.06+Math.random()*0.12, rotation: Math.random()*Math.PI*2,
-        rotSpeed: (Math.random()-0.5)*0.008,
-        vx: (Math.random()-0.5)*0.15, vy: (Math.random()-0.5)*0.1,
-      });
-    }
-
-    _nebulaBlackHole = {
-      x: W*0.15+Math.random()*(W*0.7), y: H*0.1+Math.random()*(H*0.35),
-      radius: 25, angle: 0, speed: 0.025,
-    };
-
-    _nebulaMeteors = [];
-    for (var i = 0; i < NEBULA_METEOR_COUNT; i++) {
-      _nebulaMeteors.push(_nebulaCreateMeteor());
-    }
+  function initParticleCount() {
+    if (!canvas) return;
+    particleCount = Math.min(180, Math.floor(width * height / 6500));
   }
 
-  function _nebulaCreateMeteor() {
-    var W = _nebulaCanvas.width, H = _nebulaCanvas.height;
-    return {
-      x: Math.random()*W*0.85+W*0.05, y: Math.random()*(H*0.45),
-      vx: 2.5+Math.random()*6, vy: 1.2+Math.random()*3,
-      life: 0, maxLife: 70+Math.random()*160, active: true,
-      length: 80+Math.random()*120,
-    };
-  }
+  class Particle {
+    constructor() {
+      this.reset();
+    }
 
-  function _nebulaDrawStar(ctx, x, y, radius, brightness, hue, sat, light, alpha) {
-    var glow = radius * 5;
-    var grad = ctx.createRadialGradient(x, y, 0, x, y, glow);
-    var base = alpha * brightness;
-    grad.addColorStop(0, 'hsla('+hue+','+sat+'%,'+Math.min(light+25,100)+'%,'+base+')');
-    grad.addColorStop(0.5, 'hsla('+hue+','+sat+'%,'+light+'%,'+base*0.3+')');
-    grad.addColorStop(1, 'hsla('+hue+','+sat+'%,'+light+'%,0)');
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(x, y, glow, 0, Math.PI*2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(x, y, radius*0.4, 0, Math.PI*2);
-    ctx.fillStyle = 'rgba(255,255,255,'+alpha*brightness*0.85+')';
-    ctx.fill();
-  }
+    reset() {
+      this.x = Math.random() * width;
+      this.y = Math.random() * height;
+      this.size = Math.random() * 4.5 + 2;
+      this.vx = (Math.random() - 0.5) * 0.4;
+      this.vy = (Math.random() - 0.5) * 0.4;
+      this.density = Math.random() * 20 + 5;
+      this.hueOffset = Math.random() * 360;
+      this.alpha = Math.random() * 0.5 + 0.5;
+    }
 
-  function _nebulaDrawCloud(ctx, c, t) {
-    ctx.save();
-    ctx.globalAlpha = c.alpha;
-    ctx.translate(c.x + c.vx*t, c.y + c.vy*t);
-    ctx.rotate(c.rotation + c.rotSpeed*t);
-    for (var i = 0; i < 4; i++) {
-      var r = c.radius*(0.5+i*0.2);
-      var grad = ctx.createRadialGradient(0,0,0,0,0,r);
-      var h = (c.hue1+i*25)%360;
-      var l = 55+i*10;
-      grad.addColorStop(0, 'hsla('+h+',75%,'+l+'%,0.6)');
-      grad.addColorStop(0.5, 'hsla('+c.hue2+',65%,'+(l-10)+'%,0.3)');
-      grad.addColorStop(1, 'hsla('+h+',50%,30%,0)');
-      ctx.fillStyle = grad;
+    update() {
+      const dx = mouse.x - this.x;
+      const dy = mouse.y - this.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+
+      if (distance < mouse.explodeRadius) {
+        explosions.push(new Explosion(this.x, this.y, this.hueOffset));
+        this.reset();
+        return;
+      }
+
+      if (distance < mouse.attractRadius) {
+        const force = (mouse.attractRadius - distance) / mouse.attractRadius;
+        const forceX = dx / distance * force * 0.04;
+        const forceY = dy / distance * force * 0.04;
+        this.vx += forceX;
+        this.vy += forceY;
+      }
+
+      this.vx += (Math.random() - 0.5) * 0.008;
+      this.vy += (Math.random() - 0.5) * 0.008;
+
+      const maxSpeed = 0.6;
+      const speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+      if (speed > maxSpeed) {
+        this.vx = (this.vx / speed) * maxSpeed;
+        this.vy = (this.vy / speed) * maxSpeed;
+      }
+
+      this.x += this.vx;
+      this.y += this.vy;
+
+      if (this.x < -15) this.x = width + 15;
+      if (this.x > width + 15) this.x = -15;
+      if (this.y < -15) this.y = height + 15;
+      if (this.y > height + 15) this.y = -15;
+    }
+
+    draw() {
+      const color = `hsl(${hue + this.hueOffset}, 100%, 65%)`;
       ctx.beginPath();
-      ctx.arc(0,0,r,0,Math.PI*2);
+      ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.globalAlpha = this.alpha;
       ctx.fill();
-    }
-    ctx.restore();
-  }
 
-  function _nebulaDrawBlackHole(ctx, bh, t) {
-    ctx.save();
-    var rot = bh.angle + bh.speed*t;
-    var glowR = bh.radius*6;
-    var gG = ctx.createRadialGradient(bh.x,bh.y,bh.radius*0.5,bh.x,bh.y,glowR);
-    gG.addColorStop(0,'rgba(180,200,255,0.2)');
-    gG.addColorStop(0.3,'rgba(100,130,255,0.12)');
-    gG.addColorStop(0.7,'rgba(60,40,150,0.06)');
-    gG.addColorStop(1,'rgba(0,0,0,0)');
-    ctx.fillStyle = gG;
-    ctx.beginPath(); ctx.arc(bh.x,bh.y,glowR,0,Math.PI*2); ctx.fill();
-
-    ctx.translate(bh.x, bh.y);
-    ctx.rotate(rot);
-    for (var i = 0; i < 20; i++) {
-      var r = bh.radius*(1.0+i*0.2);
-      var h = (200+i*14+t*0.6)%360;
-      ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2);
-      ctx.strokeStyle = 'hsla('+h+',85%,65%,0.12)';
-      ctx.lineWidth = 1.5+Math.sin(i*1.2+t*0.04)*1.2;
-      ctx.stroke();
-    }
-    for (var i = 0; i < 12; i++) {
-      var r = bh.radius*(0.9+i*0.15);
-      var h = (220+i*18+t*0.8)%360;
-      ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2);
-      ctx.strokeStyle = 'hsla('+h+',90%,75%,0.15)';
-      ctx.lineWidth = 2+Math.sin(i*1.8+t*0.05)*1.0;
-      ctx.stroke();
-    }
-    var gB = ctx.createRadialGradient(0,0,0,0,0,bh.radius);
-    gB.addColorStop(0,'rgba(0,0,0,1)');
-    gB.addColorStop(0.6,'rgba(0,0,0,0.95)');
-    gB.addColorStop(1,'rgba(40,60,140,0.4)');
-    ctx.fillStyle = gB;
-    ctx.beginPath(); ctx.arc(0,0,bh.radius,0,Math.PI*2); ctx.fill();
-    ctx.beginPath(); ctx.arc(0,0,bh.radius*0.98,0,Math.PI*2);
-    ctx.strokeStyle = 'rgba(160,200,255,0.15)';
-    ctx.lineWidth = 2; ctx.stroke();
-    ctx.restore();
-  }
-
-  function _nebulaDrawMeteor(ctx, m) {
-    if (!m.active) return;
-    var progress = m.life / m.maxLife;
-    if (progress >= 1) return;
-    var fade = 1 - progress;
-    var x = m.x + m.vx*m.life;
-    var y = m.y + m.vy*m.life;
-    var len = m.length*(1-progress*0.3);
-    var angle = Math.atan2(m.vy, m.vx);
-    ctx.save();
-    ctx.globalAlpha = fade*0.95;
-    ctx.translate(x, y);
-    ctx.rotate(angle);
-    var grad = ctx.createLinearGradient(0,0,-len,0);
-    grad.addColorStop(0,'rgba(255,255,255,1)');
-    grad.addColorStop(0.3,'rgba(200,230,255,0.7)');
-    grad.addColorStop(1,'rgba(255,255,255,0)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(-len,-2.2,len,4.4);
-    ctx.beginPath(); ctx.arc(0,0,8,0,Math.PI*2);
-    ctx.fillStyle = 'rgba(255,255,255,'+0.5*fade+')';
-    ctx.fill();
-    ctx.restore();
-  }
-
-  function _nebulaFrame() {
-    if (!_nebulaCtx) return;
-    var W = _nebulaCanvas.width, H = _nebulaCanvas.height;
-    var ctx = _nebulaCtx;
-    _nebulaTime++;
-
-    var gB = 0.6 + 0.4*Math.sin(_nebulaTime*0.008);
-
-    // 背景
-    var bg = ctx.createRadialGradient(W/2,H/2,0,W/2,H/2,Math.max(W,H)*0.7);
-    bg.addColorStop(0,'#0a0a24');
-    bg.addColorStop(0.5,'#06061a');
-    bg.addColorStop(1,'#02020d');
-    ctx.fillStyle = bg;
-    ctx.fillRect(0,0,W,H);
-
-    // 星云
-    for (var i = 0; i < _nebulaClouds.length; i++) {
-      _nebulaDrawCloud(ctx, _nebulaClouds[i], _nebulaTime);
-    }
-    // 星尘
-    for (var i = 0; i < _nebulaDust.length; i++) {
-      var p = _nebulaDust[i];
-      var px = p.x + p.vx*_nebulaTime;
-      var py = p.y + p.vy*_nebulaTime;
-      var flicker = 0.5+0.5*Math.sin(_nebulaTime*0.01+p.phase);
-      var a = p.alpha*flicker;
-      ctx.beginPath(); ctx.arc(px,py,p.radius,0,Math.PI*2);
-      ctx.fillStyle = 'rgba(180,210,255,'+a+')';
+      const gradient = ctx.createRadialGradient(
+        this.x, this.y, 0,
+        this.x, this.y, this.size * 5
+      );
+      gradient.addColorStop(0, color);
+      gradient.addColorStop(1, 'transparent');
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.size * 5, 0, Math.PI * 2);
+      ctx.fillStyle = gradient;
+      ctx.globalAlpha = 0.2;
       ctx.fill();
+
+      ctx.globalAlpha = 1;
     }
-    // 黑洞
-    _nebulaDrawBlackHole(ctx, _nebulaBlackHole, _nebulaTime);
-    // 星星
-    for (var i = 0; i < _nebulaStars.length; i++) {
-      var s = _nebulaStars[i];
-      var fl = 0.2+0.8*Math.sin(_nebulaTime*0.02*s.speed+s.phase);
-      var br = s.brightness*fl*gB;
-      _nebulaDrawStar(ctx, s.x, s.y, s.radius, br, s.hue, s.sat, s.light, 1.0);
-    }
-    // 流星
-    for (var i = 0; i < _nebulaMeteors.length; i++) {
-      var m = _nebulaMeteors[i];
-      if (m.active) {
-        _nebulaDrawMeteor(ctx, m);
-        m.life++;
-        if (m.life > m.maxLife) {
-          m.active = false;
-          (function(mm){
-            setTimeout(function(){
-              var nm = _nebulaCreateMeteor();
-              mm.x=nm.x; mm.y=nm.y; mm.vx=nm.vx; mm.vy=nm.vy;
-              mm.life=0; mm.maxLife=nm.maxLife; mm.active=true; mm.length=nm.length;
-            }, 1200+Math.random()*2500);
-          })(m);
-        }
+  }
+
+  class Explosion {
+    constructor(x, y, baseHue) {
+      this.x = x;
+      this.y = y;
+      this.particles = [];
+      for (let i = 0; i < 20; i++) {
+        const angle = (Math.PI * 2 / 20) * i + Math.random() * 0.3;
+        const speed = Math.random() * 3 + 1;
+        this.particles.push({
+          x: x,
+          y: y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          size: Math.random() * 3 + 1.2,
+          life: 1,
+          hue: baseHue + Math.random() * 40
+        });
       }
     }
 
-    _nebulaRAF = requestAnimationFrame(_nebulaFrame);
+    update() {
+      this.particles.forEach(p => {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vx *= 0.95;
+        p.vy *= 0.95;
+        p.life -= 0.015;
+        p.size *= 0.97;
+      });
+      this.particles = this.particles.filter(p => p.life > 0);
+    }
+
+    draw() {
+      this.particles.forEach(p => {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fillStyle = `hsl(${hue + p.hue}, 100%, 70%)`;
+        ctx.globalAlpha = p.life;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      });
+    }
   }
 
-  // 暴露启动/停止接口
-  window.startNebulaAnimation = function() {
-    _nebulaInit();
-    _nebulaTime = 0;
-    if (_nebulaRAF) cancelAnimationFrame(_nebulaRAF);
-    _nebulaFrame();
-  };
-  window.stopNebulaAnimation = function() {
-    if (_nebulaRAF) { cancelAnimationFrame(_nebulaRAF); _nebulaRAF = null; }
-  };
+  function init() {
+    if (!canvas || !ctx) return;
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
 
-  // 窗口自适应
+    initParticleCount();
+
+    particles.length = 0;
+    for (let i = 0; i < particleCount; i++) {
+      particles.push(new Particle());
+    }
+
+    mouse.x = width / 2;
+    mouse.y = height / 2;
+  }
+
+  function connectParticles() {
+    const connectDistance = 120;
+    for (let a = 0; a < particles.length; a++) {
+      for (let b = a + 1; b < particles.length; b++) {
+        const dx = particles[a].x - particles[b].x;
+        const dy = particles[a].y - particles[b].y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        if (distance < connectDistance) {
+          const opacity = 1 - distance / connectDistance;
+          const color = `hsla(${hue + particles[a].hueOffset}, 100%, 65%, ${opacity * 0.28})`;
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 0.8;
+          ctx.beginPath();
+          ctx.moveTo(particles[a].x, particles[a].y);
+          ctx.lineTo(particles[b].x, particles[b].y);
+          ctx.stroke();
+        }
+      }
+    }
+  }
+
+  function animate() {
+    if (!ctx) return;
+    ctx.fillStyle = 'rgba(5, 5, 10, 0.1)';
+    ctx.fillRect(0, 0, width, height);
+
+    hue = (hue + 0.2) % 360;
+
+    connectParticles();
+
+    particles.forEach(p => {
+      p.update();
+      p.draw();
+    });
+
+    for (let i = explosions.length - 1; i >= 0; i--) {
+      explosions[i].update();
+      explosions[i].draw();
+      if (explosions[i].particles.length === 0) {
+        explosions.splice(i, 1);
+      }
+    }
+
+    const mouseGlow = ctx.createRadialGradient(
+      mouse.x, mouse.y, 0,
+      mouse.x, mouse.y, mouse.attractRadius
+    );
+    mouseGlow.addColorStop(0, `hsla(${hue}, 100%, 70%, 0.08)`);
+    mouseGlow.addColorStop(1, 'transparent');
+    ctx.fillStyle = mouseGlow;
+    ctx.beginPath();
+    ctx.arc(mouse.x, mouse.y, mouse.attractRadius, 0, Math.PI * 2);
+    ctx.fill();
+
+    raf = requestAnimationFrame(animate);
+  }
+
+  window.addEventListener('mousemove', e => {
+    mouse.x = e.clientX;
+    mouse.y = e.clientY;
+  });
+
+  window.addEventListener('touchmove', e => {
+    e.preventDefault();
+    mouse.x = e.touches[0].clientX;
+    mouse.y = e.touches[0].clientY;
+  });
+
+  window.addEventListener('touchstart', e => {
+    mouse.x = e.touches[0].clientX;
+    mouse.y = e.touches[0].clientY;
+  });
+
   window.addEventListener('resize', function() {
-    if (_nebulaRAF && _nebulaCanvas) {
-      _nebulaCanvas.width = window.innerWidth;
-      _nebulaCanvas.height = window.innerHeight;
-      _nebulaInit();
+    if (raf && canvas) {
+      width = canvas.width = window.innerWidth;
+      height = canvas.height = window.innerHeight;
+      init();
     }
   });
+
+  window.startNebulaAnimation = function() {
+    init();
+    if (raf) cancelAnimationFrame(raf);
+    animate();
+  };
+
+  window.stopNebulaAnimation = function() {
+    if (raf) { cancelAnimationFrame(raf); raf = null; }
+  };
 })();
 </script>
 
 <div class="modal" id="ctxModal"><div class="modal-box" style="width:680px;max-height:88vh"><span class="close" onclick="closeContextDebug()">&times;</span><h2>🧠 AI 上下文调试</h2>
 <div class="ctx-grid" id="ctx_content"><div style="color:var(--dim);text-align:center;padding:20px">加载中...</div></div>
 </div></div>
+
+<div class="modal" id="worldviewModal"><div class="modal-box" style="width:720px;max-height:80vh"><span class="close" onclick="closeWorldviewModal()">&times;</span>
+<h2>🧠 AI 世界观生成</h2>
+<div style="margin-top:14px">
+  <div id="worldviewResult" style="min-height:200px;max-height:50vh;overflow-y:auto;padding:16px;background:var(--bg-deep);border:1px solid var(--border);border-radius:10px;color:var(--text);line-height:1.8;font-size:.95em;white-space:pre-wrap">
+    <div style="text-align:center;color:var(--dim);padding:40px">点击下方按钮开始生成世界观...</div>
+  </div>
+</div>
+<div style="display:flex;gap:12px;margin-top:16px;justify-content:flex-end">
+  <button onclick="generateWorldview()" id="btnGenerateWorldview" style="padding:10px 20px;background:rgba(110,169,201,.15);border:1px solid rgba(110,169,201,.4);border-radius:8px;color:#6ea9c9;font-weight:600;font-size:.9em;cursor:pointer">🧠 AI生成世界观</button>
+  <button onclick="generateWorldview()" id="btnRegenerateWorldview" style="padding:10px 20px;background:rgba(110,169,201,.15);border:1px solid rgba(110,169,201,.4);border-radius:8px;color:#6ea9c9;font-weight:600;font-size:.9em;cursor:pointer;display:none">🔄 再次生成</button>
+  <button onclick="confirmWorldview()" style="padding:10px 24px;background:var(--gold);border:none;border-radius:8px;color:#0d0c0f;font-weight:700;font-size:.9em;cursor:pointer">✅ 确定填入</button>
+</div>
+</div></div>
+
+<div class="npc-chat-panel" id="npcChatPanel">
+  <div class="npc-chat-header">
+    <span style="font-weight:600;color:var(--gold)">💬 角色聊天</span>
+    <span class="npc-chat-close" onclick="toggleNpcChatPanel()">✕</span>
+  </div>
+  <div class="npc-chat-body">
+    <div class="npc-chat-list" id="chatNpcList">
+      <div style="color:var(--dim);font-size:.8em;text-align:center;padding:15px">加载NPC列表...</div>
+    </div>
+    <div class="npc-chat-main">
+      <div class="npc-chat-title" id="chatHeader">选择一个角色开始聊天</div>
+      <div class="npc-chat-messages" id="chatMessages"></div>
+      <div class="npc-chat-input">
+        <input type="text" id="chatInput" placeholder="输入消息..." onkeydown="if(event.key==='Enter')sendChatMessage()">
+        <button onclick="sendChatMessage()">发送</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div class="modal" id="viewHistoryModal"><div class="modal-box" style="width:800px;max-height:92vh;overflow-y:auto"><span class="close" onclick="closeViewHistory()">&times;</span><h2>📖 已有世界</h2>
 <div id="history_world_list" style="margin-bottom:18px"></div>
@@ -1026,7 +1386,7 @@
 </div>
 </div></div>
 
-<div class="modal" id="v10PanelModal"><div class="modal-box" style="width:900px;max-width:95vw;max-height:88vh;display:flex;flex-direction:column"><span class="close" onclick="closeV10Panel()">&times;</span>
+<div class="modal" id="v10PanelModal"><div class="modal-box" style="width:900px;max-width:95vw;height:88vh;display:flex;flex-direction:column"><span class="close" onclick="closeV10Panel()">&times;</span>
 <h2 style="margin-bottom:10px">🔮 太虚幻境高级功能面板</h2>
 <div style="display:flex;gap:8px;margin-bottom:14px;flex-shrink:0;flex-wrap:wrap">
 <div class="wp-tab active" onclick="switchV10Tab('foreshadow')" id="v10_tab_foreshadow">🧵 伏笔</div>
@@ -1069,13 +1429,17 @@
 
 <script src="/js/dom.js?v=3"></script>
 <script src="/js/core.js?v=3"></script>
-<script src="/js/bg-manager.js?v=1"></script>
-<script src="/js/ui.js?v=11"></script>
-<script src="/js/game.js?v=11"></script>
-<script src="/js/config-shared.js?v=3"></script>
-<script src="/js/settings.js?v=7"></script>
+<script src="/js/bg-manager.js?v=4"></script>
+<script src="/js/ui.js?v=14"></script>
+<script src="/js/game.js?v=21"></script>
+<script src="/js/config-shared.js?v=6"></script>
+<script src="/js/settings.js?v=10"></script>
 <script src="/js/v10_panel.js?v=3"></script>
 <script src="/js/npc_prediction.js?v=1"></script>
+<script src="/js/auto_run.js?v=3"></script>
+<script src="/js/novel_roleplay.js?v=10"></script>
+<script src="/js/causal_graph.js?v=1"></script>
+<script src="/js/events.js?v=1"></script>
 <!-- alpine-components.js moved to <head> before alpine.js CDN (see fix note) -->
 
 <div class="modal" id="npcPredictionModal"><div class="modal-box" style="width:850px;max-width:95vw;max-height:88vh;display:flex;flex-direction:column"><span class="close" onclick="closeNpcPrediction()">&times;</span>
@@ -1095,5 +1459,64 @@
 <div style="color:var(--dim);text-align:center;padding:20px">暂无推演报告，请先执行推演</div>
 </div>
 </div></div>
+
+<!-- 免责声明弹窗 -->
+<div class="modal" id="disclaimerModal"><div class="modal-box" style="width:700px;max-width:95vw;max-height:88vh;display:flex;flex-direction:column">
+<span class="close" onclick="closeDisclaimer()">&times;</span>
+<h2 style="margin-bottom:6px">📋 软件免责声明与使用条款</h2>
+<div style="font-size:.78em;color:var(--dim);margin-bottom:14px">更新日期：2026年07月17日</div>
+<div style="flex:1;overflow-y:auto;font-size:.88em;line-height:1.8;color:var(--text-muted)">
+<p style="margin-bottom:12px">本软件为完全免费、非盈利、个人独立开发的AI辅助工具，面向所有用户开放无限制使用、免费传播，无任何功能付费、强制订阅、权限锁定机制。</p>
+
+<h4 style="color:var(--gold);margin:16px 0 8px">一、服务与性质声明</h4>
+<p style="margin-bottom:8px">1. 本软件仅提供文本检索、知识库解析、AI剧情推演、本地记忆管理等技术性辅助能力，属于工具类软件，不生产、不审核、不干预用户自主输入的小说文本、人物设定、对话内容与操作行为。</p>
+<p style="margin-bottom:8px">2. 本软件所有AI生成内容均由大模型概率生成，存在不确定性、逻辑性偏差、虚构内容、设定偏差等情况，所有AI输出内容仅供用户参考，不具备任何事实、历史、法律与现实效力。</p>
+<p style="margin-bottom:8px">3. 本软件采用开源技术组件开发（包含但不限于Zvec、LightRAG、BGE-M3、Python生态等），所有开源组件遵循对应开源协议，软件本体永久免费开放。</p>
+
+<h4 style="color:var(--gold);margin:16px 0 8px">二、用户责任与内容合规</h4>
+<p style="margin-bottom:8px">1. 用户为唯一责任主体。用户自行承担所有导入文本、创作内容、操作行为的合规责任，严禁使用本软件生成违法、违规、侵权、低俗、涉密、损害他人权益的内容。</p>
+<p style="margin-bottom:8px">2. 若用户导入第三方受版权保护的小说、文本素材，需自行获得合法授权。因用户私自导入侵权素材引发的一切版权纠纷、法律责任，由用户自行承担，本软件开发者不承担任何连带责任。</p>
+<p style="margin-bottom:8px">3. 用户不得利用本软件从事违法违规、商业侵权、不良内容创作等行为，一经发现，责任由用户自负。</p>
+
+<h4 style="color:var(--gold);margin:16px 0 8px">三、免责与责任限制</h4>
+<p style="margin-bottom:8px">1. 本软件按「现状提供」，不提供任何明示或暗示的担保，包括但不限于软件稳定性、运行不间断、无BUG、内容绝对准确、适配所有设备与系统等担保。</p>
+<p style="margin-bottom:8px">2. 在法律允许的最大范围内，开发者不对任何间接损失、数据丢失、使用异常、纠纷争议承担任何赔偿责任，包括但不限于使用本软件产生的创作损失、设备故障、数据丢失、第三方纠纷等。</p>
+<p style="margin-bottom:8px">3. 本软件为个人非盈利作品，无运营主体、无商业资质，用户自愿下载、安装、使用，即代表同意自行承担全部使用风险。</p>
+
+<h4 style="color:var(--gold);margin:16px 0 8px">四、数据与隐私声明</h4>
+<p style="margin-bottom:8px">1. 本软件优先采用本地离线运行机制，用户导入的小说素材、对话记录、个人数据默认存储于用户本地设备，不会私自上传、收集、贩卖用户隐私数据。</p>
+<p style="margin-bottom:8px">2. 部分AI推演功能需调用第三方模型接口，数据传输遵循对应平台隐私规则，开发者不截留、不存储用户上传的私有文本内容。</p>
+
+<h4 style="color:var(--gold);margin:16px 0 8px">五、最终说明</h4>
+<p style="margin-bottom:8px">用户下载、安装、运行本软件，即表示已阅读、理解并完全同意本免责声明全部条款。若不同意本条款，请立即卸载并停止使用本软件。</p>
+<p>本声明在法律允许范围内拥有最终解释权。</p>
+</div>
+<button class="btn" onclick="closeDisclaimer()" style="margin-top:16px;width:auto;padding:10px 28px">我已阅读并同意</button>
+</div></div>
+
+<script>
+function openDisclaimer(){document.getElementById('disclaimerModal').style.display='block'}
+function closeDisclaimer(){document.getElementById('disclaimerModal').style.display='none'}
+// 首次访问时自动弹出免责声明
+(function(){
+  try{
+    if(!localStorage.getItem('disclaimer_accepted')){
+      setTimeout(function(){
+        document.getElementById('disclaimerModal').style.display='block';
+      },800);
+    }
+  }catch(e){}
+  // 用户点击"我已阅读并同意"后记录
+  var origClose=closeDisclaimer;
+  window.closeDisclaimer=function(){
+    try{localStorage.setItem('disclaimer_accepted','1')}catch(e){}
+    document.getElementById('disclaimerModal').style.display='none';
+  };
+})();
+</script>
+
+<!-- [v1.5 第一期] 紧急事件弹窗容器 -->
+<div id="eventPopupOverlay" style="position:fixed;inset:0;z-index:9998;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.55);backdrop-filter:blur(3px)"></div>
+
 </body>
 </html>

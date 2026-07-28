@@ -40,6 +40,11 @@ function onWorldTypeChange() {
   gfDesc.textContent = descMap[wt] || descMap['custom'];
 }
 
+// [Bug] GS 全局游戏状态变量，必须显式声明，否则在 showGame() 中访问会报 "GS is not defined"
+var GS = null;
+// [Bug] 清除小说角色扮演标记（正常创建/加载游戏时恢复背景轮换）
+window._isNovelRoleplay = false;
+
 // ===== 世界新闻系统 =====
 var newsItems = [];
 var newsExpanded = false;
@@ -247,10 +252,24 @@ async function loadSlotGame(wid, slotId) {
     showGame(true);
     clearNews();
     restoreHistory(d.history || [], d.images || []);
+    // [Bug] restoreHistory 会清空叙事面板，世界观简介需在它之后插入到顶部
+    if (slotRes.world_intro) {
+      var nb = $('nb');
+      var introTitle = document.createElement('p');
+      introTitle.className = 'event';
+      introTitle.innerHTML = sanitizeHTML('【' + (GS.world?.name || '新世界') + ' 世界观简介】').replace(/\n/g, '<br>');
+      var introBody = document.createElement('p');
+      introBody.className = 'narrative';
+      introBody.innerHTML = sanitizeHTML(slotRes.world_intro).replace(/\n/g, '<br>');
+      nb.insertBefore(introBody, nb.firstChild);
+      nb.insertBefore(introTitle, introBody);
+    }
     // 优先使用 slot 加载后重新生成的选项（更符合当前状态）
     const opts = (slotRes.initial_options && slotRes.initial_options.length) ? slotRes.initial_options : (d.initial_options || []);
     if (opts.length) showOpts(opts);
     updateStatus();
+    // [v1.5 第一期] 加载槽位后渲染事件列表
+    if (typeof updateEvents === 'function') updateEvents(d.player_events, d.world_events);
     if (!d.images || d.images.length === 0) {
       var worldDesc = (GS.world?.description || '') + ' ' + (GS.world?.name || '');
       if (worldDesc.trim()) {
@@ -281,6 +300,314 @@ async function deleteSave(wid, name) {
     loadSaves();
   } catch(e) {
     alert('删除失败');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 功能2：角色聊天系统
+// ═══════════════════════════════════════════════════════════════
+
+var _currentChatNpcId = null;
+var _chatHistory = {};
+var _npcChatPanelOpen = false;
+
+function toggleNpcChatPanel() {
+  var panel = $('npcChatPanel');
+  if (!panel) return;
+  
+  _npcChatPanelOpen = !_npcChatPanelOpen;
+  if (_npcChatPanelOpen) {
+    panel.classList.add('on');
+    loadChatNpcList();
+  } else {
+    panel.classList.remove('on');
+  }
+}
+
+function openNpcChat() {
+  toggleNpcChatPanel();
+}
+
+function closeNpcChat() {
+  if (_npcChatPanelOpen) {
+    toggleNpcChatPanel();
+  }
+}
+
+async function loadChatNpcList() {
+  var listEl = $('chatNpcList');
+  if (!listEl) return;
+
+  try {
+    var npcRes = await api('GET', '/api/npcs');
+    var npcs = npcRes.npcs || [];
+    var playerName = '主角';
+    if (GS && GS.player && GS.player.name) {
+      playerName = GS.player.name;
+    }
+
+    var html = '<div class="chat-npc-item" onclick="selectChatNpc(\'player\', \'' + playerName + '\')" style="padding:10px 12px;border-radius:8px;cursor:pointer;margin-bottom:6px;background:var(--panel);border:1px solid var(--border);transition:all .2s hover:border-color:var(--gold);display:flex;align-items:center;gap:10px">';
+    html += '<div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg, var(--gold), #b8953f);display:flex;align-items:center;justify-content:center;color:#0d0c0f;font-weight:700;font-size:.85em">我</div>';
+    html += '<div><div style="font-weight:600;color:var(--text-bright)">' + playerName + '</div><div style="font-size:.75em;color:var(--dim)">主角</div></div></div>';
+
+    if (!npcs || npcs.length === 0) {
+      html += '<div style="color:var(--dim);font-size:.8em;text-align:center;padding:20px">暂无其他角色</div>';
+    } else {
+      npcs.forEach(function(npc) {
+        var npcId = npc.id || '';
+        var npcName = npc.name || '未知';
+        var npcRole = npc.role || '';
+        var relation = npc.relation_type || '陌生人';
+        var avatar = npcName.charAt(0);
+        html += '<div class="chat-npc-item" onclick="selectChatNpc(\'' + npcId + '\', \'' + npcName + '\')" style="padding:10px 12px;border-radius:8px;cursor:pointer;margin-bottom:6px;background:var(--panel);border:1px solid var(--border);transition:all .2s hover:border-color:var(--gold);display:flex;align-items:center;gap:10px">';
+        html += '<div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg, #5a8bc9, #4a7bb9);display:flex;align-items:center;justify-content:center;color:white;font-weight:700;font-size:.85em">' + avatar + '</div>';
+        html += '<div><div style="font-weight:600;color:var(--text-bright)">' + npcName + '</div><div style="font-size:.75em;color:var(--dim)">' + (npcRole || relation) + '</div></div></div>';
+      });
+    }
+
+    listEl.innerHTML = html;
+  } catch(e) {
+    listEl.innerHTML = '<div style="color:#e07a7a;font-size:.8em;text-align:center;padding:20px">加载失败</div>';
+    console.error('loadChatNpcList failed:', e);
+  }
+}
+
+function selectChatNpc(npcId, npcName) {
+  _currentChatNpcId = npcId;
+  $('chatHeader').textContent = '💬 ' + npcName;
+
+  var messagesEl = $('chatMessages');
+  if (!_chatHistory[npcId]) {
+    _chatHistory[npcId] = [];
+    messagesEl.innerHTML = '<div style="color:var(--dim);font-size:.85em;text-align:center;padding:30px">开始与 ' + npcName + ' 聊天...</div>';
+  } else {
+    renderChatMessages(npcId);
+  }
+
+  $('chatInput').focus();
+}
+
+function renderChatMessages(npcId) {
+  var messagesEl = $('chatMessages');
+  var history = _chatHistory[npcId] || [];
+
+  if (history.length === 0) {
+    messagesEl.innerHTML = '<div style="color:var(--dim);font-size:.85em;text-align:center;padding:30px">开始聊天...</div>';
+    return;
+  }
+
+  var html = '';
+  history.forEach(function(msg) {
+    if (msg.role === 'user') {
+      html += '<div style="display:flex;justify-content:flex-end"><div style="max-width:70%;padding:10px 14px;background:var(--gold);color:#0d0c0f;border-radius:12px 12px 0 12px;font-size:.9em;line-height:1.6">' + msg.content + '</div></div>';
+    } else {
+      html += '<div style="display:flex;justify-content:flex-start"><div style="max-width:70%;padding:10px 14px;background:var(--panel);color:var(--text);border-radius:12px 12px 12px 0;font-size:.9em;line-height:1.6">' + msg.content + '</div></div>';
+    }
+  });
+
+  messagesEl.innerHTML = html;
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+var _chatStreaming = false;
+var _chatStreamContent = "";
+var _chatReplyAdded = false;
+var _chatTargetNpcId = null;
+
+function sendChatMessage() {
+  var input = $('chatInput');
+  var message = input.value.trim();
+
+  if (!message || !_currentChatNpcId) return;
+  if (_chatStreaming) return;
+
+  var messagesEl = $('chatMessages');
+
+  _chatHistory[_currentChatNpcId].push({role: 'user', content: message});
+  renderChatMessages(_currentChatNpcId);
+
+  input.value = '';
+
+  _chatStreaming = true;
+  _chatStreamContent = "";
+  _chatReplyAdded = false;
+  _chatTargetNpcId = _currentChatNpcId;
+
+  var assistantDiv = document.createElement('div');
+  assistantDiv.id = 'chatStreamBubble';
+  assistantDiv.style.cssText = 'display:flex;justify-content:flex-start';
+  assistantDiv.innerHTML = '<div style="max-width:70%;padding:10px 14px;background:var(--panel);color:var(--text);border-radius:12px 12px 12px 0;font-size:.9em;line-height:1.6"><span style="color:var(--dim)">正在输入...</span></div>';
+  messagesEl.appendChild(assistantDiv);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+
+  wsOnNpcChatToken = function(token) {
+    if (!_chatStreaming) return;
+    _chatStreamContent += token;
+    if (_chatTargetNpcId === _currentChatNpcId) {
+      var bubble = document.getElementById('chatStreamBubble');
+      if (bubble) {
+        var inner = bubble.querySelector('div');
+        if (inner) {
+          inner.innerHTML = _chatStreamContent.replace(/\n/g, '<br>');
+        }
+        var msgsEl = $('chatMessages');
+        if (msgsEl) {
+          msgsEl.scrollTop = msgsEl.scrollHeight;
+        }
+      }
+    }
+  };
+
+  wsOnNpcChatEnd = function() {
+    _chatStreaming = false;
+    wsOnNpcChatToken = null;
+    wsOnNpcChatEnd = null;
+
+    var targetId = _chatTargetNpcId;
+
+    if (_chatStreamContent.trim()) {
+      if (!_chatHistory[targetId]) {
+        _chatHistory[targetId] = [];
+      }
+      _chatHistory[targetId].push({role: 'assistant', content: _chatStreamContent});
+      _chatReplyAdded = true;
+      if (targetId === _currentChatNpcId) {
+        var streamBubble = document.getElementById('chatStreamBubble');
+        if (streamBubble) {
+          streamBubble.remove();
+        }
+        renderChatMessages(targetId);
+      }
+    } else {
+      if (targetId === _currentChatNpcId) {
+        var streamBubble2 = document.getElementById('chatStreamBubble');
+        if (streamBubble2) {
+          streamBubble2.remove();
+        }
+      }
+    }
+    _chatStreamContent = "";
+  };
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    sendWS({
+      type: 'npc_chat',
+      npc_id: _currentChatNpcId,
+      message: message,
+      history: _chatHistory[_currentChatNpcId]
+    });
+  } else {
+    _chatStreaming = false;
+    var bubble = document.getElementById('chatStreamBubble');
+    if (bubble) bubble.remove();
+    _chatHistory[_currentChatNpcId].push({role: 'assistant', content: 'WebSocket 未连接，请检查网络。'});
+    renderChatMessages(_currentChatNpcId);
+  }
+}
+
+function handleNpcChatResult(result) {
+  wsOnNpcChatToken = null;
+  wsOnNpcChatEnd = null;
+
+  var targetId = _chatTargetNpcId;
+
+  if (_chatStreaming) {
+    _chatStreaming = false;
+    if (targetId === _currentChatNpcId) {
+      var streamBubble = document.getElementById('chatStreamBubble');
+      if (streamBubble) {
+        streamBubble.remove();
+      }
+    }
+  }
+
+  if (result && result.success && result.message) {
+    if (!_chatReplyAdded) {
+      if (!_chatHistory[targetId]) {
+        _chatHistory[targetId] = [];
+      }
+      _chatHistory[targetId].push({role: 'assistant', content: result.message});
+      if (targetId === _currentChatNpcId) {
+        renderChatMessages(targetId);
+      }
+    }
+  } else if (!_chatReplyAdded) {
+    var errorMsg = result && result.error ? result.error : '聊天失败';
+    if (!_chatHistory[targetId]) {
+      _chatHistory[targetId] = [];
+    }
+    _chatHistory[targetId].push({role: 'assistant', content: '❌ ' + errorMsg});
+    if (targetId === _currentChatNpcId) {
+      renderChatMessages(targetId);
+    }
+  }
+
+  _chatStreamContent = "";
+  _chatReplyAdded = false;
+  _chatTargetNpcId = null;
+}
+
+var _generatedWorldview = "";
+
+function openWorldviewModal() {
+  $('worldviewModal').classList.add('on');
+}
+
+function closeWorldviewModal() {
+  $('worldviewModal').classList.remove('on');
+}
+
+function confirmWorldview() {
+  if (_generatedWorldview) {
+    $('wd').value = _generatedWorldview;
+    closeWorldviewModal();
+  }
+}
+
+async function generateWorldview() {
+  var generateBtn = $('btnGenerateWorldview');
+  var regenerateBtn = $('btnRegenerateWorldview');
+  var resultBox = $('worldviewResult');
+
+  if (!resultBox) return;
+
+  if (generateBtn) generateBtn.disabled = true;
+  if (regenerateBtn) regenerateBtn.disabled = true;
+  var activeBtn = (generateBtn && generateBtn.style.display !== 'none') ? generateBtn : regenerateBtn;
+  if (activeBtn) activeBtn.textContent = '⏳ 生成中...';
+
+  var worldType = $('wt').value;
+  var existingDesc = $('wd').value.trim();
+
+  resultBox.innerHTML = '<div style="text-align:center;color:var(--gold);padding:40px">正在生成世界观，大概需要30秒，请稍候...</div>';
+
+  try {
+    var res = await api('POST', '/api/generate-worldview', {
+      world_type: worldType,
+      existing_description: existingDesc
+    });
+    if (res && res.ok && res.worldview) {
+      _generatedWorldview = res.worldview;
+      resultBox.textContent = res.worldview;
+      if (generateBtn) generateBtn.style.display = 'none';
+      if (regenerateBtn) regenerateBtn.style.display = '';
+    } else {
+      _generatedWorldview = "";
+      var msg = res && res.msg ? res.msg : "生成失败";
+      resultBox.innerHTML = `<div style="text-align:center;color:#e07a7a;padding:40px">${msg}</div>`;
+    }
+  } catch(e) {
+    _generatedWorldview = "";
+    resultBox.innerHTML = `<div style="text-align:center;color:#e07a7a;padding:40px">请求失败: ${e.message || e}</div>`;
+  } finally {
+    if (generateBtn) generateBtn.disabled = false;
+    if (regenerateBtn) regenerateBtn.disabled = false;
+    if (generateBtn && generateBtn.style.display !== 'none') {
+      generateBtn.textContent = '🧠 AI生成世界观';
+    }
+    if (regenerateBtn && regenerateBtn.style.display !== 'none') {
+      regenerateBtn.textContent = '🔄 再次生成';
+    }
   }
 }
 
@@ -317,7 +644,7 @@ async function createWorld() {
   var _loadingTextEl = document.getElementById('loadingText');
   var _loadingOverlay = document.getElementById('loadingOverlay');
   if (_loadingOverlay && _loadingTextEl && _loadingStageEl) {
-    _loadingTextEl.textContent = '正在初始化虚拟世界，需要3分钟时间';
+    _loadingTextEl.textContent = '正在初始化虚拟世界，大约需要3-5分钟时间';
     _loadingStageEl.textContent = worldGenStages[0];
     _loadingOverlay.style.display = 'flex';
     if (typeof window.startNebulaAnimation === 'function') window.startNebulaAnimation();
@@ -335,7 +662,7 @@ async function createWorld() {
     }, 20000);
   } else {
     // 回退方案：修改按钮文字
-    document.querySelector('.btn').textContent = '正在初始化虚拟世界，需要3分钟时间...';
+    document.querySelector('.btn').textContent = '正在初始化虚拟世界，大约需要3-5分钟时间...';
   }
   document.querySelector('.btn').disabled = true;
   var worldType = $('wt').value;
@@ -348,7 +675,7 @@ async function createWorld() {
       api_key: apiKey,
       base_url: baseUrl,
       model_name: modelName
-    });
+    }, 600000);
     if (d.error) { alert(d.error); return; }
     GS = d.state;
     showGame();
@@ -389,8 +716,22 @@ async function loadGame(wid) {
     showGame(true);
     clearNews();
     restoreHistory(d.history || [], d.images || []);
+    // [Bug] restoreHistory 会清空叙事面板，世界观简介需在它之后插入到顶部
+    if (d.world_intro) {
+      var nb = $('nb');
+      var introTitle = document.createElement('p');
+      introTitle.className = 'event';
+      introTitle.innerHTML = sanitizeHTML('【' + (GS.world?.name || '新世界') + ' 世界观简介】').replace(/\n/g, '<br>');
+      var introBody = document.createElement('p');
+      introBody.className = 'narrative';
+      introBody.innerHTML = sanitizeHTML(d.world_intro).replace(/\n/g, '<br>');
+      nb.insertBefore(introBody, nb.firstChild);
+      nb.insertBefore(introTitle, introBody);
+    }
     if (d.initial_options && d.initial_options.length) showOpts(d.initial_options);
     updateStatus();
+    // [v1.5 第一期] 加载存档后渲染事件列表
+    if (typeof updateEvents === 'function') updateEvents(d.player_events, d.world_events);
     if (!d.images || d.images.length === 0) {
       var worldDesc = (GS.world?.description || '') + ' ' + (GS.world?.name || '');
       if (worldDesc.trim()) {
@@ -409,7 +750,12 @@ async function doBack() {
   if (choice) await doSave();
   $('game').style.display = 'none';
   $('home').style.display = 'flex';
+  var _p = ['createWorldPage','loadSavePage','novelRoleplayPage'];
+  _p.forEach(function(id){var el=document.getElementById(id); if(el) el.style.display='none';});
   loadSaves();
+  if (typeof setHomeBackground === 'function') {
+    setHomeBackground();
+  }
 }
 
 async function pickOpt(id, txt) {
@@ -725,6 +1071,8 @@ function sendInputStream(t) {
       finalState = null;
       processStreamResult(r);
     }
+    // [v1.5 第一期] 叙事流结束后检查紧急事件弹窗（避免在流式输出中打断）
+    if (typeof checkUrgentPopup === 'function') checkUrgentPopup();
   };
 
   wsOnThinking = function() {
@@ -845,6 +1193,9 @@ function processStreamResult(result) {
       showRetryButton(r._retry_input);
     }
   }
+
+  // [v1.5 第一期] 玩家回合可能跨日 → 跨日会生成新事件，异步刷新事件列表
+  if (typeof refreshEventsList === 'function') refreshEventsList();
 }
 
 async function sendInputHTTP(t) {
@@ -924,6 +1275,10 @@ async function sendInputHTTP(t) {
         showRetryButton(r._retry_input);
       }
     }
+    // [v1.5 第一期] HTTP 回退路径同样刷新事件列表（玩家回合可能跨日）
+    if (typeof refreshEventsList === 'function') refreshEventsList();
+    // 流式失败回退到此处的 HTTP 路径，同样需要检查紧急事件弹窗
+    if (typeof checkUrgentPopup === 'function') checkUrgentPopup();
   } catch(e) {
     addNarrative('错误:' + e.message);
   }
@@ -1825,14 +2180,51 @@ async function loadHistoryWorlds() {
       listEl.innerHTML = '<div style="color:var(--dim);font-size:.85em">暂无存档</div>';
       return;
     }
-    var html = '<div style="display:flex;flex-wrap:wrap;gap:6px">';
+    var html = '<div style="display:flex;flex-direction:column;gap:6px">';
     saves.forEach(function(save) {
-      html += '<div class="abtn" onclick="loadHistoryContent(\'' + save.world_id + '\')" style="cursor:pointer;padding:5px 12px;font-size:.82em">' + (save.world_name || save.world_id) + '</div>';
+      var wName = save.world_name || save.world_id;
+      var timeStr = save.last_saved_at_display || save.created_at_display || '';
+      var dayStr = save.current_day ? ('第' + save.current_day + '天') : '';
+      html += '<div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:rgba(212,175,55,.06);border:1px solid rgba(212,175,55,.15);border-radius:6px">' +
+        '<div onclick="loadHistoryContent(\'' + save.world_id + '\')" style="cursor:pointer;flex:1;min-width:0">' +
+          '<div style="color:#e0d5c0;font-size:.85em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(wName) + '</div>' +
+          '<div style="color:var(--dim);font-size:.72em">' + escapeHtml(dayStr + (timeStr ? (' | ' + timeStr) : '')) + '</div>' +
+        '</div>' +
+        '<span onclick="event.stopPropagation();loadHistoryWorldIntoGame(\'' + escAttr(save.world_id) + '\')" ' +
+          'style="color:#7a9a7a;cursor:pointer;font-size:.9em;padding:4px 8px;border-radius:4px;border:1px solid rgba(122,154,122,.3)" title="加载此世界进入游戏">&#9654; 加载</span>' +
+        '<span onclick="event.stopPropagation();deleteHistoryWorld(\'' + escAttr(save.world_id) + '\',\'' + escAttr(wName) + '\')" ' +
+          'style="color:#9a5a5a;cursor:pointer;font-size:.9em;padding:4px 8px;border-radius:4px;border:1px solid rgba(154,90,90,.3)" title="删除此世界">&#10005; 删除</span>' +
+        '</div>';
     });
     html += '</div>';
     listEl.innerHTML = html;
   } catch(e) {
     listEl.innerHTML = '<div style="color:var(--dim);font-size:.85em">加载失败</div>';
+  }
+}
+
+async function deleteHistoryWorld(wid, name) {
+  if (!confirm('确定删除世界「' + name + '」？此操作不可撤销，所有剧情和存档都会丢失。')) return;
+  try {
+    await api('DELETE', '/api/save/' + wid);
+    loadHistoryWorlds();
+    $('history_content').innerHTML = '<div style="color:var(--dim);text-align:center;padding:30px">选择一个存档查看内容</div>';
+    try {
+      if (window.Alpine && Alpine.store('app')) {
+        Alpine.store('app').showToast('已删除世界「' + name + '」', 'success');
+      }
+    } catch(e) {}
+  } catch(e) {
+    alert('删除失败: ' + (e.message || ''));
+  }
+}
+
+async function loadHistoryWorldIntoGame(wid) {
+  try {
+    closeViewHistory();
+    await loadGame(wid);
+  } catch(e) {
+    alert('加载失败: ' + (e.message || ''));
   }
 }
 
@@ -1887,7 +2279,7 @@ function closeWorldPanel() {
 }
 
 function switchWorldTab(tab) {
-  ['map', 'graph', 'timeline', 'events'].forEach(function(t) {
+  ['map', 'graph', 'timeline', 'events', 'chat'].forEach(function(t) {
     var panel = $('wp_' + t);
     var tabEl = $('wp_tab_' + t);
     if (panel) panel.classList.toggle('active', t === tab);
@@ -1897,6 +2289,7 @@ function switchWorldTab(tab) {
   else if (tab === 'graph') loadWorldGraph();
   else if (tab === 'timeline') loadWorldTimeline();
   else if (tab === 'events') loadWorldEvents();
+  else if (tab === 'chat') loadChatNpcList();
 }
 
 async function loadWorldMap() {

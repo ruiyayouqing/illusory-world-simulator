@@ -37,8 +37,10 @@ BUILTIN_STYLES: dict[str, str] = {
         "注重细节描写和心理刻画，语言凝练，情感内敛。叙事节奏沉稳，不追求爽感。"
     ),
     "网文爽文": (
-        "快节奏网文风格，爽点密集，系统提示频繁。"
-        "数据化呈现（战力值/经验值），升级打怪，装逼打脸。语言直白有力，每段都有钩子。"
+        "快节奏网文风格，爽点密集，奇遇连连。"
+        "主角光环明显，升级打怪，装逼打脸。节奏明快，冲突不断，语言直白有力，每段都有钩子。"
+        "（注意：即使是爽文风格，也不允许出现「系统提示」「叮！」「好感度+5」等游戏化文本，"
+        "所有金手指元素必须用小说笔法融入叙事。）"
     ),
     "诗化散文": (
         "意境优先的散文风格，类似《额尔古纳右岸》或迟子建的作品。"
@@ -53,6 +55,8 @@ class NarrativeStyleManager:
     def __init__(self, config_path: Optional[Path] = None):
         self._config_path = config_path
         self._config_cache: dict | None = None
+        # [v1.3] 小说角色扮演模式标记：启用后强制使用第三人称
+        self.is_novel_roleplay: bool = False
 
     def _load_config(self) -> dict:
         if self._config_cache is not None:
@@ -129,14 +133,19 @@ class NarrativeStyleManager:
         result = f"【写作风格：{style_name}】\n{description}"
 
         # [Bug] 叙事视角：统一人称，避免混用
+        # [v1.3] 小说角色扮演模式默认第三人称，可通过 novel_roleplay.narrative_perspective 覆盖
         config = self._load_config()
-        perspective = config.get("game", {}).get("narrative_perspective", "third")
+        if getattr(self, 'is_novel_roleplay', False):
+            # 小说模式：默认第三人称，可由专门字段覆盖
+            perspective = config.get("novel_roleplay", {}).get("narrative_perspective", "third")
+        else:
+            perspective = config.get("game", {}).get("narrative_perspective", "third")
         perspective_map = {
             "first": "【叙事视角：第一人称】\n叙事中统一使用「我」来指代玩家，如「我走进了大殿」、「我拔出剑」。禁止使用玩家姓名或「你」。",
             "second": "【叙事视角：第二人称】\n叙事中统一使用「你」来指代玩家，如「你走进了大殿」、「你拔出剑」。禁止使用玩家姓名代替「你」。",
             "third": "【叙事视角：第三人称】\n叙事中统一使用玩家姓名来指代玩家，如「张立走进了大殿」、「张立拔出剑」。禁止使用「你」或「我」。",
         }
-        perspective_instruction = perspective_map.get(perspective, perspective_map["second"])
+        perspective_instruction = perspective_map.get(perspective, perspective_map["third"])
         result += f"\n\n{perspective_instruction}"
 
         return result

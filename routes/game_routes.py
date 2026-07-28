@@ -26,7 +26,7 @@ class CreateGameRequest(BaseModel):
     api_key: str
     base_url: str = "https://token-plan-cn.xiaomimimo.com/v1"
     model_name: str = "mimo-V2.5-Pro"
-    world_name: str = "自定义世界"
+    world_name: str = "大明风华"
 
 
 class LoadGameRequest(BaseModel):
@@ -59,6 +59,10 @@ class SlotRequest(BaseModel):
 
 class AddExpRequest(BaseModel):
     amount: int
+
+
+class EventRespondRequest(BaseModel):
+    action: str = "accept"  # accept | reject | ignore | view
 
 
 def _apply_image_config(eng):
@@ -99,24 +103,38 @@ async def list_saves():
 
 @router.get("/worlds")
 async def list_worlds():
-    try:
-        db = get_meta_db()
-        worlds = db.list_worlds()
-        return {"worlds": worlds}
-    except Exception as e:
-        logger.error("List worlds failed: %s", e)
-        save_dir = BASE_DIR / "saves"
-        if not save_dir.exists():
-            return {"worlds": []}
-        index_file = save_dir / "index.json"
-        if not index_file.exists():
-            return {"worlds": []}
+    # [v1.3] 合并 MetaDB + index.json，防止两数据源不同步导致"加载存档"页看不到世界
+    save_dir = BASE_DIR / "saves"
+    index_file = save_dir / "index.json"
+    # 1. 从 index.json 读取（文件系统真实存档）
+    index_worlds = {}
+    if index_file.exists():
         try:
             index = json.loads(index_file.read_text(encoding="utf-8"))
-            worlds = list(index.get("saves", {}).values())
-            return {"worlds": worlds}
-        except Exception:
-            return {"worlds": []}
+            for wid, info in index.get("saves", {}).items():
+                index_worlds[wid] = info
+        except Exception as e:
+            logger.warning("Failed to read index.json: %s", e)
+    # 2. 从 MetaDB 读取（补充元信息）
+    db_worlds = {}
+    try:
+        db = get_meta_db()
+        for w in db.list_worlds():
+            db_worlds[w.get("world_id", "")] = w
+    except Exception as e:
+        logger.warning("MetaDB list_worlds failed: %s", e)
+    # 3. 合并：以 index.json 为主（文件系统真实存在），MetaDB 补充缺失字段
+    merged = {}
+    for wid, info in index_worlds.items():
+        merged[wid] = {**info, **{k: v for k, v in db_worlds.get(wid, {}).items() if k not in info or not info.get(k)}}
+    # 4. 补充 MetaDB 中有但 index.json 没有的（理论上不应出现，防止数据丢失）
+    for wid, w in db_worlds.items():
+        if wid not in merged:
+            merged[wid] = w
+    # 5. 按最后保存时间排序
+    worlds = list(merged.values())
+    worlds.sort(key=lambda x: x.get("last_saved_at", x.get("created_at", "")), reverse=True)
+    return {"worlds": worlds}
 
 
 @router.get("/worlds/{world_id}/saves")
@@ -163,12 +181,46 @@ async def get_state():
         raise HTTPException(status_code=503, detail="游戏未初始化")
     history = engine.narrative_history
     images = engine.visual_engine.image_history if engine.visual_engine else []
-    return {"state": engine.get_game_state(), "history": history, "images": images}
+    # [v1.5 第一期] 返回事件清单（玩家事件 + 世界事件），前端按优先级渲染
+    player_events = []
+    world_events = []
+    if getattr(engine, 'player_event_bus', None):
+        player_events = [e.to_dict() for e in engine.player_event_bus.list_pending()]
+    if getattr(engine, 'world_event_bus', None):
+        world_events = [e.to_dict() for e in engine.world_event_bus.list_pending()]
+    return {
+        "state": engine.get_game_state(),
+        "history": history,
+        "images": images,
+        "player_events": player_events,
+        "world_events": world_events,
+    }
 
 
 @router.post("/create")
 async def create_game(req: CreateGameRequest):
-    raise HTTPException(status_code=410, detail="示例世界已移除，请使用 /api/generate-world 生成自定义世界")
+    # [v10.5] 加 _engine_switch_lock，防止并发创建/加载导致全局 engine 竞态
+    async with _engine_switch_lock:
+        engine = GameEngine(str(BASE_DIR / "saves"))
+        engine.init_llm(req.api_key, req.base_url, req.model_name)
+
+        _apply_image_config(engine)
+
+        world_path = BASE_DIR / "data" / "worlds" / "demo_ming" / "world.json"
+        world_data = json.loads(world_path.read_text(encoding="utf-8"))
+        player_data = world_data["roles"]["player"]
+        npc_data_list = [world_data["roles"]["npc_苏梅"], world_data["roles"]["npc_张大叔"]]
+
+        world_id = engine.create_new_game(world_data, player_data, npc_data_list, req.world_name)
+        state = engine.get_game_state()
+        engine.save_game("auto")
+        # [Bug] 必须在游戏状态完全初始化后才 set_engine，否则其他请求可能读到半初始化的引擎
+        set_engine(engine)
+
+    return {
+        "world_id": world_id,
+        "state": state,
+    }
 
 
 @router.post("/load")
@@ -195,7 +247,22 @@ async def load_game(req: LoadGameRequest):
                 except Exception as e:
                     logger.warning("Failed to generate initial options on load: %s", e)
                     initial_options = engine.option_engine._fallback_options(engine.player_state)
-            return {"info": info, "state": state, "history": history, "images": images, "initial_options": initial_options}
+            # [Bug] 加载存档时恢复世界观简介，否则前端只恢复历史叙事但丢失初始世界观
+            world_intro = ""
+            if engine.world_def:
+                world_intro = engine.world_def.get("world_intro", "")
+            if not world_intro and engine.world_def:
+                desc = engine.world_def.get("description", "")
+                name = engine.world_def.get("world_name", "未知世界")
+                factions = ", ".join(engine.world_def.get("factions", {}).keys()) or "未知"
+                locations = ", ".join(engine.world_def.get("locations", {}).keys()) or "未知"
+                power = engine.world_def.get("power_system", {})
+                power_name = power.get("name", "未知")
+                power_levels = " → ".join([lv.get("name", "") for lv in power.get("levels", [])]) if power.get("levels") else ""
+                world_intro = f"【{name}】\n\n{desc}\n\n势力分布：{factions}\n已知地点：{locations}\n力量体系：{power_name}"
+                if power_levels:
+                    world_intro += f"（{power_levels}）"
+            return {"info": info, "state": state, "history": history, "images": images, "initial_options": initial_options, "world_intro": world_intro}
         except Exception as e:
             logger.error("Load game failed: %s", e, exc_info=True)
             return {"error": f"加载游戏失败: {e}"}
@@ -221,30 +288,249 @@ async def player_input(req: PlayerInputRequest):
                     result["narrative"] = result["narrative"] + "\n\n" + rumor_text
             state = engine.get_game_state()
             # [Bug] process_player_input 内部已调用 save_game("auto")，此处不再重复保存
+        # [v1.4 P1-7] 统一 narrative 持久化：
+        # narrative 现已由 TurnProcessorV2._save_snapshot 写入每世界 history.db，
+        # 不再冗余写入 MetaDB.narrative 表（搜索/统计接口已改读 history.db）。
+        # 仅更新 worlds 表的 last_saved_at 时间戳。
         try:
             db = get_meta_db()
-            if result.get("narrative"):
-                db.add_narrative(
-                    engine.current_world_id, "narrative",
-                    engine.world_state.current_day if engine.world_state else 0,
-                    engine.world_state.current_time if engine.world_state else "",
-                    result["narrative"][:2000], req.input
-                )
-            if result.get("auto_event"):
-                db.add_narrative(
-                    engine.current_world_id, "event",
-                    engine.world_state.current_day if engine.world_state else 0,
-                    engine.world_state.current_time if engine.world_state else "",
-                    result["auto_event"].get("narrative", "")[:2000], "",
-                    result["auto_event"].get("event_type", "")
-                )
             db.update_world_saved(engine.current_world_id)
         except Exception as e:
-            logger.warning("Failed to sync narrative to MetaDB: %s", e)
+            logger.warning("Failed to update world_saved in MetaDB: %s", e)
         return {"result": result, "state": state}
     except Exception as e:
         logger.error("Player input failed: %s", e, exc_info=True)
         return {"error": f"处理输入失败: {e}"}
+
+
+# ── [v1.5 第一期] 事件响应接口 ──────────────────────────────────────────
+
+def _generate_bridge_narrative(engine, evt, npc) -> str:
+    """[v1.5 第一期] 生成玩家接受事件后的"桥接叙事"（LLM 生成 1 段，失败则用模板）
+
+    桥接叙事用于在玩家点"应门"后、正式进入 NPC 聊天之前，
+    用一段叙事文本自然过渡（避免界面突兀切换）。
+    """
+    npc_name = getattr(npc, "name", "来客") if npc else "来客"
+    npc_role = getattr(npc, "role", "") if npc else ""
+    npc_personality = getattr(npc, "personality", "") if npc else ""
+    npc_speaking = getattr(npc, "speaking_style", "") if npc else ""
+    evt_title = evt.title or ""
+    evt_type = evt.event_type or ""
+    priority = evt.priority or "normal"
+    day = engine.world_state.current_day if engine.world_state else 1
+    time_str = engine.world_state.current_time if engine.world_state else ""
+    player_name = engine.player_state.name if engine.player_state else "玩家"
+    location = engine.player_state.location if engine.player_state else ""
+
+    # 优先用 LLM 生成更长的桥接叙事（约 4-6 句）
+    if engine.llm:
+        try:
+            prompt = (
+                f"你是叙事小说家，正在为一个虚拟世界游戏写一段【事件桥接叙事】。\n"
+                f"玩家：{player_name}，位于 {location}\n"
+                f"当前：第{day}天 {time_str}\n"
+                f"事件：{evt_title}（类型：{evt_type}，紧迫度：{priority}）\n"
+                f"上门的 NPC：{npc_name}"
+                + (f"（身份：{npc_role}）" if npc_role else "")
+                + (f"，性格：{npc_personality}" if npc_personality else "")
+                + (f"，说话风格：{npc_speaking}" if npc_speaking else "")
+                + "\n\n"
+                f"请写 4-6 句话的第三人称叙事，描述玩家前去应门/接待这位访客的过程，"
+                f"包括：玩家起身/出门的动作、见到的场景、对方的状态与神情、"
+                f"对方开口说出的第一句话（用引号包裹）。\n"
+                f"要求：\n"
+                f"- 第二人称视角称呼玩家为\"你\"\n"
+                f"- 不要替玩家做决定或回应\n"
+                f"- 文风简洁、有画面感\n"
+                f"- 直接输出叙事文本，不要任何解释或前后缀"
+            )
+            bridge = engine.llm.chat(prompt, temperature=0.8, max_tokens=400)
+            bridge = (bridge or "").strip()
+            if bridge and len(bridge) > 20:
+                return bridge
+        except Exception as e:
+            logger.warning("Bridge narrative LLM generation failed: %s", e)
+
+    # 回退：模板
+    mood = "急切" if priority == "urgent" else ("平和" if priority == "important" else "随意")
+    return (
+        f"你听到动静，起身前去开门。只见{name_var(npc_name)}站在门口，"
+        f"神情{mood}。{name_var(npc_name)}见到你，开口道："
+        f"\"{evt_title}。\""
+    )
+
+
+def name_var(name: str) -> str:
+    """简单辅助：避免重复书写变量名"""
+    return name
+
+
+@router.post("/events/{event_id}/respond")
+async def respond_event(event_id: str, req: EventRespondRequest):
+    """[v1.5 第一期] 玩家响应事件（接受/拒绝/忽略/查看）
+
+    - accept：接受事件。玩家事件 → 生成桥接叙事 + 返回 npc_id 供前端进入聊天；
+                       世界事件 → 标记为已查看，注入到主叙事。
+    - reject：拒绝事件。事件标记为 rejected，可能有后果（第二期实现）。
+    - ignore：忽略事件。事件保持 pending，玩家可稍后处理。
+    - view：仅查看事件详情，不改状态。
+    """
+    engine = get_engine()
+    if not engine or not engine.player_state:
+        raise HTTPException(status_code=503, detail="游戏未初始化")
+
+    action = (req.action or "view").lower()
+    if action not in ("accept", "reject", "ignore", "view"):
+        raise HTTPException(status_code=400, detail="action 必须是 accept/reject/ignore/view")
+
+    # 在两个 bus 中查找事件
+    evt = None
+    bus = None
+    if getattr(engine, 'player_event_bus', None):
+        evt = engine.player_event_bus.find(event_id)
+        if evt:
+            bus = engine.player_event_bus
+    if not evt and getattr(engine, 'world_event_bus', None):
+        evt = engine.world_event_bus.find(event_id)
+        if evt:
+            bus = engine.world_event_bus
+    if not evt:
+        raise HTTPException(status_code=404, detail="事件不存在或已过期")
+
+    # 仅查看：返回详情
+    if action == "view":
+        return {"event": evt.to_dict()}
+
+    # 标记事件状态
+    status_map = {"accept": "accepted", "reject": "rejected", "ignore": "pending"}
+    new_status = status_map[action]
+    if new_status != "pending":
+        bus.mark(event_id, new_status)
+
+    response: dict = {"event_id": event_id, "action": action, "status": new_status}
+
+    # 接受事件的处理
+    if action == "accept":
+        if evt.category == "player" and evt.source_npc:
+            # 玩家事件 + 接受 → 生成桥接叙事 + 进入 NPC 聊天
+            npc = engine.npc_states.get(evt.source_npc) if engine.npc_states else None
+            bridge = _generate_bridge_narrative(engine, evt, npc)
+            # 把桥接叙事写入主叙事历史，让前端 addNarrative 注入
+            engine.narrative_history.append({
+                "type": "narrative",
+                "day": engine.world_state.current_day if engine.world_state else 0,
+                "time": engine.world_state.current_time if engine.world_state else "",
+                "text": bridge,
+                "event_id": event_id,
+            })
+            # 记录 NPC 主动访问的 recent_action，避免 7 天内重复
+            if npc is not None:
+                npc.recent_actions = (npc.recent_actions or []) + [{
+                    "action_type": "player_visit",
+                    "day": engine.world_state.current_day if engine.world_state else 0,
+                    "event_id": event_id,
+                }]
+                # 只保留最近 20 条
+                if len(npc.recent_actions) > 20:
+                    npc.recent_actions = npc.recent_actions[-20:]
+            response["bridge_narrative"] = bridge
+            response["npc_id"] = evt.source_npc
+            response["npc_name"] = evt.payload.get("npc_name", "")
+        elif evt.category == "world":
+            # 世界事件 + 接受 → 标记为已查看，注入主叙事作为"世界公告"
+            announcement = f"【世界公告】{evt.title}\n{evt.summary}"
+            engine.narrative_history.append({
+                "type": "event",
+                "day": engine.world_state.current_day if engine.world_state else 0,
+                "time": engine.world_state.current_time if engine.world_state else "",
+                "text": announcement,
+                "event_id": event_id,
+                "event_type": evt.event_type,
+            })
+            response["announcement"] = announcement
+
+    # 持久化（mark 内部已 _save，但桥接叙事改了 narrative_history 也需要存档）
+    try:
+        engine.save_game("auto")
+    except Exception as e:
+        logger.warning("Auto-save after event respond failed: %s", e)
+
+    return response
+
+
+@router.get("/events")
+async def list_events():
+    """[v1.5 第一期] 获取当前所有待处理事件（玩家事件 + 世界事件）"""
+    engine = get_engine()
+    if not engine:
+        raise HTTPException(status_code=503, detail="游戏未初始化")
+    player_events = []
+    world_events = []
+    if getattr(engine, 'player_event_bus', None):
+        player_events = [e.to_dict() for e in engine.player_event_bus.list_pending()]
+    if getattr(engine, 'world_event_bus', None):
+        world_events = [e.to_dict() for e in engine.world_event_bus.list_pending()]
+    return {"player_events": player_events, "world_events": world_events}
+
+
+@router.post("/events/clear-expired")
+async def clear_expired_events():
+    """[v1.5 第一期] 清理过期事件（手动触发，跨日时已自动清理）"""
+    engine = get_engine()
+    if not engine or not engine.world_state:
+        raise HTTPException(status_code=503, detail="游戏未初始化")
+    day = engine.world_state.current_day
+    player_expired = engine.player_event_bus.expire_old(day) if engine.player_event_bus else 0
+    world_expired = engine.world_event_bus.expire_old(day) if engine.world_event_bus else 0
+    return {"player_expired": player_expired, "world_expired": world_expired}
+
+
+@router.get("/events/history")
+async def get_events_history(category: str = None, event_type: str = None,
+                              day_start: int = None, day_end: int = None,
+                              limit: int = 100):
+    """[v1.5 第二期] 查询事件历史归档（仅内存，重启清空）
+
+    Args:
+        category: 事件类别（player/world），不传=全部
+        event_type: 事件类型（visit/war/...），不传=全部
+        day_start: 起始日（含），不传=不限
+        day_end: 结束日（含），不传=不限
+        limit: 最多返回条数（默认 100，最大 500）
+    """
+    engine = get_engine()
+    if not engine or not engine.world_state:
+        raise HTTPException(status_code=503, detail="游戏未初始化")
+
+    # 限制 limit 上限
+    if limit is None or limit < 1:
+        limit = 100
+    limit = min(int(limit), 500)
+
+    player_history = []
+    world_history = []
+    if engine.player_event_bus:
+        player_history = [e.to_dict() for e in engine.player_event_bus.list_archive(
+            category=category, event_type=event_type,
+            day_start=day_start, day_end=day_end, limit=limit,
+        )]
+    if engine.world_event_bus:
+        world_history = [e.to_dict() for e in engine.world_event_bus.list_archive(
+            category=category, event_type=event_type,
+            day_start=day_start, day_end=day_end, limit=limit,
+        )]
+
+    return {
+        "player_events": player_history,
+        "world_events": world_history,
+        "player_stats": engine.player_event_bus.archive_stats() if engine.player_event_bus else {},
+        "world_stats": engine.world_event_bus.archive_stats() if engine.world_event_bus else {},
+        "filters": {
+            "category": category, "event_type": event_type,
+            "day_start": day_start, "day_end": day_end, "limit": limit,
+        },
+    }
 
 
 @router.post("/undo")
@@ -316,13 +602,16 @@ async def manual_save():
 @router.delete("/save/{world_id}")
 async def delete_save(world_id: str):
     world_id = _validate_world_id(world_id)
+    # [v1.3] 不再创建临时 GameEngine（会导致 _load_index 读取失败时用空字典覆盖 index.json）
+    #        直接操作 MetaDB + SaveManager
     try:
         db = get_meta_db()
         db.delete_world(world_id)
     except Exception as e:
         logger.warning("Failed to delete from MetaDB: %s", e)
-    engine_temp = GameEngine(str(BASE_DIR / "saves"))
-    ok = engine_temp.save_manager.delete_save(world_id)
+    from modules.save_manager import SaveManager
+    sm = SaveManager(str(BASE_DIR / "saves"))
+    ok = sm.delete_save(world_id)
     return {"status": "ok" if ok else "failed"}
 
 
@@ -489,7 +778,22 @@ async def load_from_slot(req: SlotRequest):
         except Exception as e:
             logger.warning("Failed to generate initial options after slot load: %s", e)
             initial_options = engine.option_engine._fallback_options(engine.player_state)
-    return {"status": "ok" if ok else "failed", "state": state, "initial_options": initial_options}
+    # [Bug] slot 加载后也恢复世界观简介
+    world_intro = ""
+    if ok and engine.world_def:
+        world_intro = engine.world_def.get("world_intro", "")
+        if not world_intro:
+            desc = engine.world_def.get("description", "")
+            name = engine.world_def.get("world_name", "未知世界")
+            factions = ", ".join(engine.world_def.get("factions", {}).keys()) or "未知"
+            locations = ", ".join(engine.world_def.get("locations", {}).keys()) or "未知"
+            power = engine.world_def.get("power_system", {})
+            power_name = power.get("name", "未知")
+            power_levels = " → ".join([lv.get("name", "") for lv in power.get("levels", [])]) if power.get("levels") else ""
+            world_intro = f"【{name}】\n\n{desc}\n\n势力分布：{factions}\n已知地点：{locations}\n力量体系：{power_name}"
+            if power_levels:
+                world_intro += f"（{power_levels}）"
+    return {"status": "ok" if ok else "failed", "state": state, "initial_options": initial_options, "world_intro": world_intro}
 
 
 @router.delete("/slot/{slot_id}")
