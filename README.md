@@ -45,7 +45,7 @@
 ---
 
 <p align="center">
-  <img src="screenshots/world_creation.png" alt="世界创建" width="60%">
+  <img src="screenshots/kaiji.png" alt="世界创建" width="60%">
 </p>
 
 **世界创建**：支持自定义世界设定、预设模板、文生图配置，一键生成专属异世界。
