@@ -468,16 +468,19 @@ class SaveManager:
         import gc, time, shutil
         gc.collect()
         time.sleep(0.5)
-        # 跨平台兼容：优先用 shutil，失败后用系统命令兜底
-        try:
-            shutil.rmtree(str(world_dir), ignore_errors=False)
-        except Exception as e:
-            logger.warning("shutil.rmtree failed, trying cmd fallback: %s", e)
-            import subprocess
-            subprocess.run(["cmd", "/c", "rmdir", "/s", "/q", str(world_dir)],
-                           capture_output=True, timeout=10)
-        if world_dir.exists():
-            shutil.rmtree(str(world_dir), ignore_errors=True)
+        # [Bug P4-A-2-H] 跨平台删除：纯 shutil 重试，不再用 cmd 兜底
+        # （cmd 在 Linux/Docker 下抛 FileNotFoundError，且 shutil 本身已跨平台）
+        for attempt in range(2):
+            try:
+                shutil.rmtree(str(world_dir), ignore_errors=False)
+                break
+            except Exception as e:
+                if attempt == 0:
+                    logger.warning("shutil.rmtree failed (will retry once): %s", e)
+                    time.sleep(0.3)
+                else:
+                    logger.warning("shutil.rmtree failed twice, final attempt with ignore_errors: %s", e)
+                    shutil.rmtree(str(world_dir), ignore_errors=True)
         # [v1.3] 清理该世界的独立图片文件夹 static/images/wst/{world_id}/
         try:
             wst_dir = self.base_dir.parent / "static" / "images" / "wst" / world_id

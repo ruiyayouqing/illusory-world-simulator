@@ -478,12 +478,10 @@ class LLMRouter(BaseLLM):
                     break
                 result = llm.chat(prompt, temperature=temperature, max_tokens=max_tokens)
                 if result and result.strip():
-                    # [BudgetGuard] 记录成功 + 成本
-                    self._record_call_success(
-                        getattr(llm, 'model_name', 'unknown'),
-                        getattr(llm, 'last_usage', None).prompt_tokens if hasattr(llm, 'last_usage') and llm.last_usage else 0,
-                        getattr(llm, 'last_usage', None).completion_tokens if hasattr(llm, 'last_usage') and llm.last_usage else 0,
-                    )
+                    # [Bug P4-A-2-D] 必须用 _budget_success 而非 _record_call_success：
+                    # 前者对 fallback 不清零失败计数，否则降级链末端的 RuleBasedFallbackLLM
+                    # 永远成功会把 _consecutive_failures 清零，熔断永远触发不了
+                    self._budget_success(llm)
                     return result
             except Exception as e:
                 last_error = e
@@ -523,19 +521,11 @@ class LLMRouter(BaseLLM):
                 else:
                     result = llm.chat_json(prompt, temperature=temperature, max_tokens=max_tokens)
                 if isinstance(result, dict) and "error" not in result:
-                    # [BudgetGuard] 记录成功 + 成本
-                    self._record_call_success(
-                        getattr(llm, 'model_name', 'unknown'),
-                        getattr(llm, 'last_usage', None).prompt_tokens if hasattr(llm, 'last_usage') and llm.last_usage else 0,
-                        getattr(llm, 'last_usage', None).completion_tokens if hasattr(llm, 'last_usage') and llm.last_usage else 0,
-                    )
+                    # [Bug P4-A-2-D] 用 _budget_success 而非 _record_call_success（见上）
+                    self._budget_success(llm)
                     return result
                 if isinstance(result, dict) and result.get("narrative"):
-                    self._record_call_success(
-                        getattr(llm, 'model_name', 'unknown'),
-                        getattr(llm, 'last_usage', None).prompt_tokens if hasattr(llm, 'last_usage') and llm.last_usage else 0,
-                        getattr(llm, 'last_usage', None).completion_tokens if hasattr(llm, 'last_usage') and llm.last_usage else 0,
-                    )
+                    self._budget_success(llm)
                     return result
             except Exception as e:
                 last_error = e

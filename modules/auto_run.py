@@ -102,6 +102,11 @@ class AutoRunEngine:
                 daily_logs.append(day_log)
                 total_events += ev_count
                 total_interactions += ia_count
+                # [Bug P4-A-2-I] 时间停滞保护：_run_one_day 检测到连续未推进则中止
+                if getattr(self, "_stuck_aborted", False):
+                    aborted = True
+                    error_msg = "时间系统停滞，自主运行中止"
+                    break
             except Exception as e:
                 logger.error("[AutoRun] 第 %d 天运行失败，中止: %s", i + 1, e, exc_info=True)
                 aborted = True
@@ -175,8 +180,7 @@ class AutoRunEngine:
         # Step 2: 若未跨日（单时段推进），主动调用 on_new_day 推进到下一天
         # WorldManager.advance_time 默认推进一个时段（如清晨→上午），
         # 多次调用直到跨日，确保 run_one_day 真正推进一整天。
-        # 注意：advance_time 返回的 time_events 含 new_day 标记
-        new_day_reached = bool(wm_result.get("time_events"))
+        # [Bug P4-A-2-I] 删除未使用的 new_day_reached 死变量
         # 检查时间是否真的跨日（current_day 是否变化）
         if eng.world_state.current_day == current_day_before:
             # 未跨日，继续推进直到跨日（最多再推进 5 个时段防止死循环）
@@ -188,6 +192,19 @@ class AutoRunEngine:
                 except Exception as e:
                     logger.warning("[AutoRun] 推进时段失败: %s", e)
                     break
+
+        # [Bug P4-A-2-I] 时间推进保护：连续 2 天 day 未推进则中止自主运行，
+        # 避免时间系统异常时产出 N 天重复日志
+        if eng.world_state.current_day == current_day_before:
+            self._stuck_day_count = getattr(self, "_stuck_day_count", 0) + 1
+            if self._stuck_day_count >= 2:
+                logger.error("[AutoRun] 连续 %d 天 day 未推进，中止自主运行", self._stuck_day_count)
+                self._stuck_aborted = True
+                # 返回空日志，外层 run_days 检测 _stuck_aborted 后 break
+                return {"day": current_day_before, "narrative": "（时间停滞，自主运行中止）",
+                        "events": [], "interactions": []}, 0, 0
+        else:
+            self._stuck_day_count = 0
 
         current_day = eng.world_state.current_day
 

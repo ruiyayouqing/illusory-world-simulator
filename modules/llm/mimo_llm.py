@@ -9,6 +9,11 @@ import time
 from typing import Generator, Tuple
 
 from openai import OpenAI, AsyncOpenAI
+# [Bug P4-A-2-E] 用于区分 4xx 不可重试错误，避免 key 失效还白白重试
+try:
+    from openai import APIStatusError as _OpenAIAPIStatusError
+except ImportError:  # 老版本 SDK 兼容
+    _OpenAIAPIStatusError = None
 from .base_llm import BaseLLM
 # [v1.7 P3-A] LLM 调用耗时埋点（进 TimingCollector，/api/timing 可查）
 from ..core.timing import timed, TimingCollectorInstance
@@ -123,8 +128,10 @@ class MimoLLM(BaseLLM):
     def _cache_key(self, prompt: str, temperature: float, max_tokens: int,
                    response_format: dict | None = None) -> str:
         # [v1.4 P1-6] response_format 纳入 cache_key，避免不同模式缓存冲突
+        # [Bug P4-A-2-F] model_name 纳入 cache_key，避免 main/cheap 共享 external_cache
+        # 时同 prompt 同温度的响应被对方命中（质量张冠李戴）
         rf = json.dumps(response_format, sort_keys=True) if response_format else ""
-        raw = f"{prompt}|{temperature}|{max_tokens}|{rf}"
+        raw = f"{prompt}|{temperature}|{max_tokens}|{rf}|{self.model_name}"
         return hashlib.md5(raw.encode()).hexdigest()
 
     def _get_cached(self, key: str) -> str | None:
@@ -153,6 +160,11 @@ class MimoLLM(BaseLLM):
                             except Exception:
                                 pass
                             return None
+                    # [Bug P4-A-2-F] model 校验：防止 main/cheap 共享 cache 互相命中
+                    entry_model = entry.get("model")
+                    if entry_model and entry_model != self.model_name:
+                        self._external_cache.miss_count += 1
+                        return None
                     # [P4-A-2-D] 命中计入 hit
                     self._external_cache.hit_count += 1
                     return entry.get("response")
@@ -184,6 +196,8 @@ class MimoLLM(BaseLLM):
                     "response": val,
                     "temperature": 0.0,  # 未知，用 0 占位
                     "timestamp": time.time(),
+                    # [Bug P4-A-2-F] 记录 model_name，读取时校验，防止 main/cheap 互相命中
+                    "model": self.model_name,
                 }
             except Exception as e:
                 logger.debug("external_cache set failed, disable locally: %s", e, exc_info=True)
@@ -209,6 +223,10 @@ class MimoLLM(BaseLLM):
                 if sem_key:
                     entry = self._external_cache.cache.get(sem_key)
                     if entry:
+                        # [Bug P4-A-2-F] model 校验：语义匹配可能命中其他模型的条目
+                        entry_model = entry.get("model")
+                        if entry_model and entry_model != self.model_name:
+                            return None
                         return entry.get("response")
                 return None
             except Exception as e:
@@ -336,6 +354,15 @@ class MimoLLM(BaseLLM):
                 self._set_cache(key, result)
                 return result
             except Exception as e:
+                # [Bug P4-A-2-E] 4xx（除 429）不可重试：key 失效/参数错误/模型不存在等，
+                # 重试必然失败，白白浪费时间。仅对网络错误/超时/5xx/429 重试。
+                if _OpenAIAPIStatusError and isinstance(e, _OpenAIAPIStatusError):
+                    status = getattr(e, "status_code", None) or getattr(
+                        getattr(e, "response", None), "status_code", None
+                    )
+                    if status and status != 429 and 400 <= status < 500:
+                        logger.error("LLM 调用 4xx（不可重试，status=%s）: %s", status, e)
+                        raise
                 last_error = e
                 logger.warning("LLM调用失败，重试 %d/%d: %s", attempt + 1, retries, e, exc_info=True)
                 time.sleep(self._retry_sleep_sec)
@@ -419,6 +446,14 @@ class MimoLLM(BaseLLM):
                 self._set_cache(key, result)
                 return result
             except Exception as e:
+                # [Bug P4-A-2-E] 4xx（除 429）不可重试，同 chat
+                if _OpenAIAPIStatusError and isinstance(e, _OpenAIAPIStatusError):
+                    status = getattr(e, "status_code", None) or getattr(
+                        getattr(e, "response", None), "status_code", None
+                    )
+                    if status and status != 429 and 400 <= status < 500:
+                        logger.error("LLM async 调用 4xx（不可重试，status=%s）: %s", status, e)
+                        raise
                 last_error = e
                 logger.warning("LLM async调用失败，重试 %d/%d: %s", attempt + 1, retries, e, exc_info=True)
                 await asyncio.sleep(self._retry_sleep_sec)

@@ -710,7 +710,8 @@ async def manual_save():
     engine = get_engine()
     if not engine:
         raise HTTPException(status_code=503, detail="游戏未初始化")
-    ok = engine.save_game("manual")
+    # [Bug P4-A-2-G] save_game 是同步阻塞 IO，放线程池避免阻塞事件循环
+    ok = await asyncio.to_thread(engine.save_game, "manual")
     return {"status": "ok" if ok else "failed"}
 
 
@@ -719,14 +720,18 @@ async def delete_save(world_id: str):
     world_id = _validate_world_id(world_id)
     # [v1.3] 不再创建临时 GameEngine（会导致 _load_index 读取失败时用空字典覆盖 index.json）
     #        直接操作 MetaDB + SaveManager
-    try:
-        db = get_meta_db()
-        db.delete_world(world_id)
-    except Exception as e:
-        logger.warning("Failed to delete from MetaDB: %s", e, exc_info=True)
-    from modules.save_manager import SaveManager
-    sm = SaveManager(str(BASE_DIR / "saves"))
-    ok = sm.delete_save(world_id)
+    # [Bug P4-A-2-G] delete_save 内含 gc.collect() + time.sleep(0.5) + rmtree，
+    #                必须放线程池，否则删除一个存档全服务器卡 0.5s+
+    def _do_delete() -> bool:
+        try:
+            db = get_meta_db()
+            db.delete_world(world_id)
+        except Exception as e:
+            logger.warning("Failed to delete from MetaDB: %s", e, exc_info=True)
+        from modules.save_manager import SaveManager
+        sm = SaveManager(str(BASE_DIR / "saves"))
+        return sm.delete_save(world_id)
+    ok = await asyncio.to_thread(_do_delete)
     return {"status": "ok" if ok else "failed"}
 
 
