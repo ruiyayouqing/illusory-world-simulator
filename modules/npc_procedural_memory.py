@@ -66,12 +66,20 @@ class NPCProceduralMemory:
 
     每个 NPC 拥有独立的程序性记忆空间，记录"什么动作在什么情况下有效"。
     与 BranchPlanner 配合，为 NPC 的决策提供历史经验参考。
+
+    [v1.6] 新增 embedding_sim 参数：用 Embedding 余弦相似度替换词级 Jaccard，
+    提升中文上下文匹配准确度。未注入或失败时自动回退到 Jaccard。
     """
 
-    def __init__(self, max_entries_per_npc: int = 30):
+    def __init__(self, max_entries_per_npc: int = 30, embedding_sim=None):
         # npc_agent_id -> list[ProceduralEntry]
         self._memories: dict[str, list[ProceduralEntry]] = {}
         self.max_entries_per_npc = max_entries_per_npc
+        self._embedding_sim = embedding_sim
+
+    def set_embedding_sim(self, embedding_sim):
+        """注入 Embedding 相似度计算器（延迟注入，等待 MemoryStore 就绪）。"""
+        self._embedding_sim = embedding_sim
 
     def record_action(self, npc: "NPCState", action_type: str,
                       context: str, outcome: str,
@@ -261,11 +269,21 @@ class NPCProceduralMemory:
             )
             self._memories[npc_id] = self._memories[npc_id][:self.max_entries_per_npc]
 
-    @staticmethod
-    def _context_similarity(a: str, b: str) -> float:
-        """简单的上下文相似度"""
+    def _context_similarity(self, a: str, b: str) -> float:
+        """[v1.6] 上下文相似度：优先 Embedding 余弦，回退词级 Jaccard。"""
         if not a or not b:
             return 0.0
+        # 优先 Embedding
+        if self._embedding_sim and self._embedding_sim.is_available():
+            sim = self._embedding_sim.similarity(a, b)
+            if sim >= 0:
+                return sim
+        # 回退：词级 Jaccard
+        return self._jaccard_similarity(a, b)
+
+    @staticmethod
+    def _jaccard_similarity(a: str, b: str) -> float:
+        """词级 Jaccard 相似度（回退方案）。"""
         words_a = set(a.split())
         words_b = set(b.split())
         if not words_a or not words_b:

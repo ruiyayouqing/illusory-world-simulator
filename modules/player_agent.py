@@ -55,6 +55,8 @@ class PlayerAgent(BaseAgent):
         self._llm_expansion_cache_ttl = 60  # 60秒
         # [v11] 伏笔生命周期管理器引用（由 GameEngine 注入）
         self.foreshadow_lifecycle = None
+        # [v1.6 P1-7] 上次检索引用的长期摘要（供前端展示引用徽章）
+        self._last_long_term_refs: list[dict] = []
 
     def _get_rag_cache(self, prompt: str) -> str | None:
         import hashlib
@@ -442,12 +444,15 @@ class PlayerAgent(BaseAgent):
                                    fixed_prompt: str = "",
                                    max_context: int = 32768,
                                    scene_type=None,
-                                   narrative_max_chars: int = 1000):
+                                   narrative_max_chars: int = 1000,
+                                   time_anchor: str = ""):
         """
         流式生成叙事文本。返回生成器，逐 token yield。
         与 generate_full_response 共享相同的上下文构建逻辑。
 
         [v10+] scene_type: 叙事场景类型，传入检索系统以动态调整 GraphRAG 权重。
+        [P3-A] time_anchor: 时间锚点字符串，作为独立 system message 注入，
+               避免与 fixed_prompt/世界观/记忆等大量上下文混在一起被 LLM 忽略。
         """
         npc_text = build_npc_context(npc_states, player_input, world_state) if npc_states else ""
         world_text = build_world_context(world_state) if world_state else ""
@@ -464,16 +469,8 @@ class PlayerAgent(BaseAgent):
 
         # [v10++] 优先使用 ContextEngine，失败回退到预算管理器
         stream_system_prompt = "你是一个小说作家。只输出纯文本叙事，禁止输出JSON或任何结构化格式。直接开始写故事内容。"
-        # [v12] 时间跳跃标记：AI在叙事中时间有明显跳跃时，在末尾附加标记
-        stream_system_prompt += (
-            "\n\n【时间跳跃规则】"
-            "\n如果叙事中时间有明显跳跃(如'过了三个月'、'转眼半年'、'数日后'等)，"
-            "必须在叙事正文的最末尾单独一行附加时间标记，格式为："
-            "\n<!--TIME_SKIP:天数-->"
-            "\n其中天数为跳过的天数(如3个月=90天，半年=182天，一年=365天)。"
-            "\n注意：标记必须在正文结束后单独一行，不要在正文中插入。"
-            "\n如果时间没有跳跃，不要输出任何标记。"
-        )
+        # [Bug 修复] 时间跳跃标记功能已屏蔽：AI 输出 TIME_SKIP 容易误判导致玩家突然老死。
+        # 闭关/数月后等叙事由 LLM 自然描写，游戏天数仅通过正常时段推进。
         # [Bug] 玩家身份锚点：防止流式生成时 LLM 幻觉改名
         stream_system_prompt += (
             f"\n\n【玩家身份锚点 - 最高优先级】\n"
@@ -552,11 +549,20 @@ class PlayerAgent(BaseAgent):
             {"role": "system", "content": stream_system_prompt},
             {"role": "system", "content": system_context},
         ]
+        # [P3-A] 时间锚点独立 system message：紧邻历史对话之前注入，
+        # 避免被 system_context（世界观/规则/记忆等大量文本）淹没，确保 LLM
+        # 注意到当前叙事时间线，防止"次日上午"被忽略后叙事退回"昨夜"。
+        if time_anchor:
+            messages.append({"role": "system", "content": time_anchor})
         if narrative_history:
             recent = narrative_history[-8:] if len(narrative_history) > 8 else narrative_history
-            for entry in recent:
+            _total = len(recent)
+            for idx, entry in enumerate(recent):
                 pi = entry.get("player_input", "")[:400]
-                text = entry.get("text", "")[:800]
+                # [Bug v9.1] 最近一条历史放宽截断到 1500 字，避免上一轮 AI 输出里的
+                # 时间锚点（如"第二天上午张瑶到达"）在 800 字处被截断丢失
+                text_limit = 1500 if idx == _total - 1 else 800
+                text = entry.get("text", "")[:text_limit]
                 if pi:
                     messages.append({"role": "user", "content": pi})
                 if text:
@@ -577,7 +583,8 @@ class PlayerAgent(BaseAgent):
                                max_context: int = 32768,
                                strip_gray: bool = True,
                                scene_type=None,
-                               narrative_max_chars: int = 1000) -> dict:
+                               narrative_max_chars: int = 1000,
+                               time_anchor: str = "") -> dict:
         npc_text = build_npc_context(npc_states, player_input, world_state) if npc_states else ""
         world_text = build_world_context(world_state) if world_state else ""
         player_text = build_player_context(state, world_state)
@@ -721,11 +728,17 @@ class PlayerAgent(BaseAgent):
             {"role": "system", "content": formatted_system_prompt},
             {"role": "system", "content": system_context},
         ]
+        # [P3-A] 时间锚点独立 system message（与 generate_narrative_stream 保持一致）
+        if time_anchor:
+            messages.append({"role": "system", "content": time_anchor})
         if narrative_history:
             recent = narrative_history[-6:] if len(narrative_history) > 6 else narrative_history
-            for entry in recent:
+            _total = len(recent)
+            for idx, entry in enumerate(recent):
                 pi = entry.get("player_input", "")[:300]
-                text = entry.get("text", "")[:800]
+                # [Bug v9.1] 最近一条历史放宽截断到 1500 字，避免时间锚点丢失
+                text_limit = 1500 if idx == _total - 1 else 800
+                text = entry.get("text", "")[:text_limit]
                 if pi:
                     messages.append({"role": "user", "content": pi})
                 if text:
@@ -1454,7 +1467,23 @@ class PlayerAgent(BaseAgent):
 
         # [v10+] 优先使用混合检索（如果已注入）
         narratives = None
-        if self.hybrid_retriever is not None:
+        # [v1.6 P1-5] 优先使用 CRAG+HyDE 管道（如果已注入）
+        if self.crag_hyde_pipeline is not None:
+            try:
+                world_ctx = ""
+                if self.lorebook and hasattr(self.lorebook, "world_description"):
+                    world_ctx = self.lorebook.world_description or ""
+                narratives = self.crag_hyde_pipeline.retrieve(
+                    player_input_with_expansion, top_k=5,
+                    world_context=world_ctx, scene_type=scene_type,
+                    current_day=current_day, entity_hints=entity_hints,
+                )
+                if narratives:
+                    logger.debug("CRAG+HyDE pipeline returned %d results", len(narratives))
+            except Exception as e:
+                logger.warning("CRAG+HyDE pipeline failed, falling back to hybrid: %s", e)
+                narratives = None
+        if not narratives and self.hybrid_retriever is not None:
             try:
                 # [v11] B+C: 传递 entity_hints 给图谱查询 + current_day 给排序
                 narratives = self.hybrid_retriever.retrieve(
@@ -1477,9 +1506,39 @@ class PlayerAgent(BaseAgent):
                 narratives = self.memory.search_memory(player_input_with_expansion, n_results=5)
 
         if narratives:
-            nar_texts = [n["text"][:500] for n in narratives if n.get("text")]
-            if nar_texts:
-                parts.append("【向量库检索：相关历史】\n" + "\n".join([f"- {t}" for t in nar_texts]))
+            # [v1.6 P1-7] 区分长期摘要与普通记忆，标注来源供 LLM 理解上下文层级
+            long_term_texts: list[str] = []
+            normal_texts: list[str] = []
+            for n in narratives:
+                t = n.get("text", "")
+                if not t:
+                    continue
+                if n.get("is_long_term_summary") or n.get("summary_level"):
+                    lv = n.get("summary_level", "?")
+                    m_type = n.get("milestone_type", "")
+                    tag = f"[L{lv[-1]}长期记忆"
+                    if m_type:
+                        tag += f"/{m_type}"
+                    tag += "]"
+                    long_term_texts.append(f"- {tag} {t[:500]}")
+                else:
+                    normal_texts.append(f"- {t[:500]}")
+            if long_term_texts:
+                parts.append("【长期记忆摘要：里程碑/周期/日常浓缩】\n" + "\n".join(long_term_texts))
+            if normal_texts:
+                parts.append("【向量库检索：相关历史】\n" + "\n".join(normal_texts))
+            # 缓存本次检索的长期摘要引用，供前端展示
+            self._last_long_term_refs = [
+                {
+                    "level": n.get("summary_level", ""),
+                    "milestone_type": n.get("milestone_type", ""),
+                    "day": n.get("day", 0),
+                    "text": (n.get("text", "") or "")[:100],
+                    "forced_recall": n.get("forced_recall", False),
+                }
+                for n in narratives
+                if n.get("is_long_term_summary") or n.get("summary_level")
+            ]
 
         foreshadows = self.memory.search_foreshadow(player_input_with_expansion, n_results=3)
         if foreshadows:

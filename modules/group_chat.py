@@ -6,12 +6,16 @@
 - Join 模式：多个NPC同时在prompt中
 - 自然发言顺序：基于性格的 Talkativeness 因子
 - 玩家可以选择指名NPC
+[v1.6] 新增纯 NPC 群聊场景（玩家不在场）：
+- start_npc_only_scene() 生成 3+ NPC 在某地的群聊
+- 用于茶馆议事、市井闲聊、密室商讨等场景
+- 单次 LLM 调用生成完整多轮对话（参考 NPCDialogueManager 思路）
 """
 from __future__ import annotations
 import random
 import logging
 from typing import TYPE_CHECKING
-from .prompt_utils import resolve_location_name  # [Bug] location code → display name
+from .prompt_utils import resolve_location_name, sanitize_player_input  # [Bug] location code → display name | [v1.4 P2-10] Prompt injection 防护
 
 if TYPE_CHECKING:
     from .llm.base_llm import BaseLLM
@@ -22,6 +26,45 @@ from .prompt.group_prompts import (
 )
 
 logger = logging.getLogger("chronoverse.group_chat")
+
+
+# [v1.6] 纯 NPC 群聊 prompt（玩家不在场）
+NPC_ONLY_GROUP_PROMPT = """你是虚拟世界中多角色对话的编排器。请根据场景和参与者人设，生成一段自然的多人群聊。
+
+【场景类型】{scene_type}
+【发生地点】{location}（第{day}天 {time}，{weather}）
+
+【参与者列表】
+{participants_text}
+
+【场景背景】
+{scene_context}
+
+【最近江湖大事】
+{world_events}
+
+【输出要求】
+1. 生成 {max_turns} 轮以内的群聊（一人发言一次算一轮）
+2. 严格保持每个角色的说话风格和性格
+3. 群聊要自然流动，可包含插嘴、附和、争论
+4. 信息密度高，避免空话
+5. 可包含动作神态描写（用括号标注）
+
+【输出 JSON 格式】
+{{
+    "scene_narrative": "30字以内的场景氛围描写",
+    "dialogue": [
+        {{
+            "speaker": "角色名",
+            "content": "台词",
+            "emotion": "情绪/态度",
+            "action": "可选，伴随动作"
+        }}
+    ],
+    "summary": "20字以内的见闻摘要",
+    "topic_tags": ["话题标签"]
+}}
+只输出 JSON。"""
 
 
 class GroupChatManager:
@@ -74,7 +117,8 @@ class GroupChatManager:
                 weather=world_state.weather,
                 event_context=world_state.event_history_summary[:200] if world_state.event_history_summary else "无特殊事件",
                 group_history=self._format_dialogue_log(),
-                player_input=player_input or "(场景开始)",
+                # [v1.4 P2-10] Prompt injection 防护
+                player_input=sanitize_player_input(player_input) if player_input else "(场景开始)",
             )
             result = self.llm.chat_json(prompt, temperature=0.6, max_tokens=0)
             return {
@@ -119,7 +163,8 @@ class GroupChatManager:
                 favor=npc.relation_to_player.favor,
                 group_history=self._format_dialogue_log(),
                 speaker=speaker_name,
-                latest_message=latest_message[:300],
+                # [v1.4 P2-10] Prompt injection 防护
+                latest_message=sanitize_player_input(latest_message, max_len=300),
                 other_participants=other_text,
             )
             reply = self.llm.chat(prompt, temperature=0.7, max_tokens=1024)
@@ -220,6 +265,115 @@ class GroupChatManager:
     def clear_dialogue_log(self):
         """清空对话日志"""
         self.dialogue_log = []
+
+    # ── [v1.6] 纯 NPC 群聊（玩家不在场） ────────────────────────
+
+    def start_npc_only_scene(
+        self,
+        npcs: list["NPCState"],
+        world_state: "WorldState",
+        location: str,
+        scene_type: str = "市井闲聊",
+        max_turns: int = 6,
+    ) -> dict:
+        """[v1.6] 生成纯 NPC 群聊场景（玩家不在场）。
+
+        与 start_group_scene 的区别：
+        - 不需要 player_input
+        - 单次 LLM 调用生成完整多轮对话（避免逐轮调用）
+        - 返回结构包含 summary 和 topic_tags，便于派发到「江湖见闻」流
+
+        Args:
+            npcs: 参与的 NPC 列表（建议 3-5 个）
+            world_state: 世界状态
+            location: 场景地点 code
+            scene_type: 场景类型（市井闲聊/茶馆议事/密室商讨等）
+            max_turns: 最大对话轮数
+
+        Returns:
+            {scene_narrative, dialogue, summary, topic_tags, participants}
+            LLM 失败时返回回退结构
+        """
+        if not npcs or len(npcs) < 2:
+            return {
+                "scene_narrative": "",
+                "dialogue": [],
+                "summary": "",
+                "topic_tags": [],
+                "participants": [],
+            }
+
+        # 限制参与人数（避免 prompt 过长）
+        participants_npcs = npcs[:5]
+
+        # 构建参与者文本
+        participants_text = "\n".join([
+            f"- {n.name}：{n.personality[:40] if n.personality else '普通'}，"
+            f"说话风格={n.speaking_style[:30] if n.speaking_style else '正常'}，"
+            f"身份={n.role or '无名'}"
+            for n in participants_npcs
+        ])
+
+        # 地点显示名
+        loc_name = location
+        if world_state and hasattr(world_state, "locations") and location in world_state.locations:
+            loc_obj = world_state.locations[location]
+            if isinstance(loc_obj, dict):
+                loc_name = loc_obj.get("location_name") or loc_obj.get("name") or location
+            elif hasattr(loc_obj, "location_name"):
+                loc_name = loc_obj.location_name or location
+            elif hasattr(loc_obj, "name"):
+                loc_name = loc_obj.name or location
+
+        # 场景背景
+        scene_context = f"第{world_state.current_day}天 {world_state.current_time}，{world_state.weather}"
+        world_events = (world_state.event_history_summary or "近期无特殊事件")[-300:]
+
+        try:
+            prompt = NPC_ONLY_GROUP_PROMPT.format(
+                scene_type=scene_type,
+                location=loc_name,
+                day=world_state.current_day,
+                time=world_state.current_time,
+                weather=world_state.weather,
+                participants_text=participants_text,
+                scene_context=scene_context,
+                world_events=world_events,
+                max_turns=max_turns,
+            )
+            result = self.llm.chat_json(prompt, temperature=0.7, max_tokens=0)
+            if not result:
+                raise ValueError("LLM 返回空")
+
+            return {
+                "scene_narrative": result.get("scene_narrative", ""),
+                "dialogue": result.get("dialogue", []),
+                "summary": result.get("summary", ""),
+                "topic_tags": result.get("topic_tags", []),
+                "participants": [
+                    {"npc_id": n.agent_id, "name": n.name} for n in participants_npcs
+                ],
+                "location": location,
+                "location_name": loc_name,
+                "scene_type": scene_type,
+                "day": world_state.current_day,
+            }
+        except Exception as e:
+            logger.warning("[GroupChat] NPC-only scene failed: %s", e)
+            # 回退：返回空结构，调用方降级处理
+            return {
+                "scene_narrative": f"在{loc_name}，{len(participants_npcs)}人聚在一起{scene_type}。",
+                "dialogue": [],
+                "summary": f"{participants_npcs[0].name}等人在{loc_name}{scene_type}",
+                "topic_tags": [],
+                "participants": [
+                    {"npc_id": n.agent_id, "name": n.name} for n in participants_npcs
+                ],
+                "location": location,
+                "location_name": loc_name,
+                "scene_type": scene_type,
+                "day": world_state.current_day,
+            }
 
     # ── 内部方法 ──────────────────────────────────────────
 

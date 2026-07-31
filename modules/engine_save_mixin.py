@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 from .registry import trigger_hook
 
-logger = logging.getLogger("chronoverse")
+logger = logging.getLogger("chronoverse.engine")
 
 
 class SaveMixin:
@@ -52,10 +52,15 @@ class SaveMixin:
             return ""
         timeline = self.save_manager.get_timeline(self.current_world_id)
         # [Bug] 把当前 narrative_history 一起存到 slot，加载 slot 后才能恢复历史记录
+        # [v1.3] 同时保存 image_history，让 slot 加载后历史图片也能完整呈现
+        image_history = []
+        if self.visual_engine:
+            image_history = list(self.visual_engine.image_history)
         return timeline.create_slot(
             slot_name, self.meta, self.world_state,
             self.player_state, self.npc_states, description,
             narrative_history=self.narrative_history,
+            image_history=image_history,
         )
 
     def load_from_slot(self: "GameEngine", slot_id: str) -> bool:
@@ -74,17 +79,34 @@ class SaveMixin:
         self.narrative_history = list(state.get("narrative_history", []))
         self._persisted_narrative_count = len(self.narrative_history)
         self._narrative_compressed = False
-        # [Bug] 恢复 visual_engine.image_history，否则加载 slot 后已生成的图片无法显示
+        # [v1.3] 优先从 slot 恢复 image_history（slot 自带快照）；
+        #        若 slot 无 image_history（旧版存档），回退到 game_state.json
         if self.visual_engine:
+            slot_images = state.get("image_history", [])
+            if slot_images:
+                self.visual_engine.image_history = list(slot_images)
+            else:
+                try:
+                    import json as _json
+                    from pathlib import Path
+                    gs_file = self.save_manager.base_dir / self.current_world_id / "state" / "game_state.json"
+                    if gs_file.exists():
+                        gs = _json.loads(gs_file.read_text(encoding="utf-8"))
+                        self.visual_engine.image_history = gs.get("visual_engine", {}).get("image_history", [])
+                except Exception:
+                    pass
+        # [v1.3] 从 slot 加载后重置 MemoryBrief 触发计数
+        # briefs/ 目录的 md 文件是持久化在磁盘上的，set_world_id 会重新加载到 _cache
+        # 但 _last_sleep_day / _last_incremental_turn 是触发计数，需要根据当前游戏日重置
+        # 否则从早期 slot 加载后会因 _last_sleep_day > current_day 而无法触发巩固
+        if self.memory_brief:
             try:
-                import json as _json
-                from pathlib import Path
-                gs_file = self.save_manager.base_dir / self.current_world_id / "state" / "game_state.json"
-                if gs_file.exists():
-                    gs = _json.loads(gs_file.read_text(encoding="utf-8"))
-                    self.visual_engine.image_history = gs.get("visual_engine", {}).get("image_history", [])
-            except Exception:
-                pass
+                self.memory_brief.set_world_id(self.current_world_id)
+                # 重置触发计数，让下次过夜/达到间隔时重新触发
+                self.memory_brief._last_sleep_day = -1
+                self.memory_brief._last_incremental_turn = 0
+            except Exception as e:
+                logger.warning("MemoryBrief reset on slot load failed: %s", e)
         return True
 
     def list_slots(self: "GameEngine") -> list[dict]:

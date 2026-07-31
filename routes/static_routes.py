@@ -63,3 +63,20 @@ async def serve_image(path: str):
     if not safe:
         return Response(status_code=404)
     return FileResponse(safe)
+
+
+@router.get("/api/bg-images")
+async def get_bg_images():
+    """返回二级/三级页面背景图片列表（bj 文件夹）"""
+    bj_dir = ALLOWED_IMG_DIR / "bj"
+    if not bj_dir.exists():
+        return {"images": []}
+    
+    valid_extensions = {".png", ".jpg", ".jpeg", ".webp"}
+    images = []
+    for file in bj_dir.iterdir():
+        if file.is_file() and file.suffix.lower() in valid_extensions:
+            images.append(f"/images/bj/{file.name}")
+    
+    images.sort()
+    return {"images": images}

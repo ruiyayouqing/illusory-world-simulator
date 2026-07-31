@@ -60,9 +60,13 @@ async function startAutoRun() {
   var stats = $('autoRunStats');
   var aborted = d.aborted ? ' ⚠️ 中途异常' : '';
   var errInfo = d.error ? '（错误：' + d.error + '）' : '';
+  // [Bug] LLM 章节生成失败时显示醒目提示，避免用户误以为生成了正常章节
+  var llmFailNotice = d.chapter_llm_failed
+    ? ' · ⚠️ 章节小说化失败，已降级为事件日志摘要'
+    : '';
   stats.innerHTML = '📅 第 ' + d.from_day + ' 天 ~ 第 ' + d.to_day + ' 天（共 ' +
     d.days_advanced + ' 天） · 👥 ' + d.events_count + ' 个事件 · 💬 ' +
-    d.interactions_count + ' 次代演对话' + aborted + errInfo;
+    d.interactions_count + ' 次代演对话' + aborted + errInfo + llmFailNotice;
 
   var chapterEl = $('autoRunChapter');
   var chapter = d.chapter || '（无章节内容）';
@@ -88,7 +92,20 @@ async function startAutoRun() {
       if (typeof updateStatus === 'function') updateStatus();
     }
   } catch(e) {}
-  toast('自主运行完成，章节已生成', 'success');
+
+  // [Bug] 自主运行后世界已推进 N 天，必须用后端返回的新选项刷新"选择你的行动"，
+  // 否则页面上仍是运行前的旧选项，点击会导致剧情从旧分支接续而断裂。
+  if (d.initial_options && d.initial_options.length) {
+    if (typeof showOpts === 'function') showOpts(d.initial_options);
+    var otEl = $('ot');
+    if (otEl) otEl.textContent = '选择你的行动：';
+  }
+  toast(
+    d.chapter_llm_failed
+      ? '自主运行完成，但章节小说化失败（已降级为日志摘要）'
+      : '自主运行完成，章节已生成',
+    d.chapter_llm_failed ? 'info' : 'success'
+  );
 }
 
 async function viewAutoRunChapters() {

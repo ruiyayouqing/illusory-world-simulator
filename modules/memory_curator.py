@@ -49,6 +49,14 @@ class MemoryCurator:
         self._history_summaries: list[dict] = []  # 历史摘要
         self._summary_counter = 0
         self._summarized_up_to = 0  # 已摘要到第几条（用于 generate_summary_only）
+        # [v1.6 P1-6] 长期记忆摘要器（延迟注入，可选）
+        # 注入后 generate_summary_only 会额外生成 L1 摘要并写回 MemoryStore + 审计日志
+        self._long_term_summarizer = None
+
+    def set_long_term_summarizer(self, summarizer) -> None:
+        """[v1.6 P1-6] 注入 LongTermMemorySummarizer，启用多层摘要写回向量库。"""
+        self._long_term_summarizer = summarizer
+        logger.info("MemoryCurator wired to LongTermMemorySummarizer")
 
     def should_curate(self, current_turn: int) -> bool:
         """判断是否应该触发整理"""
@@ -136,7 +144,30 @@ class MemoryCurator:
         logger.info("History summary-only #%d created: entries %d-%d summarized (original preserved)",
                      self._summary_counter, self._summarized_up_to - len(to_summarize), self._summarized_up_to - 1)
 
-        return {"status": "success", "summary": summary_entry}
+        # [v1.6 P1-6] 同步生成 L1 长期记忆摘要并写回 MemoryStore（向量库可检索）
+        # 供前端"长期记忆面板"展示与 RAG 检索复用
+        ltm_result = None
+        if self._long_term_summarizer is not None:
+            try:
+                ltm_result = self._long_term_summarizer.generate_daily_summary(
+                    entries=to_summarize,
+                    current_turn=current_turn,
+                    current_day=current_day,
+                )
+                # 累积足够 L1 后触发 L2 周期摘要
+                if (self._long_term_summarizer._daily_summaries_since_periodic
+                        >= self._long_term_summarizer.periodic_summary_threshold):
+                    # 收集最近几个 L1 摘要（来自 _history_summaries 后段）
+                    recent_l1 = self._history_summaries[-self._long_term_summarizer.periodic_summary_threshold:]
+                    self._long_term_summarizer.generate_periodic_summary(
+                        daily_summaries=recent_l1,
+                        current_turn=current_turn,
+                        current_day=current_day,
+                    )
+            except Exception as e:
+                logger.warning("LongTermMemorySummarizer L1 generation failed: %s", e)
+
+        return {"status": "success", "summary": summary_entry, "ltm": ltm_result}
 
     def _generate_summary(self, entries: list, summary_num: int) -> str:
         """使用LLM生成摘要"""

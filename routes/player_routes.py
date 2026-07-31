@@ -1,6 +1,6 @@
 from __future__ import annotations
 import logging
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from .deps import get_engine
 
@@ -12,7 +12,7 @@ router = APIRouter(prefix="/api")
 async def get_level_info():
     engine = get_engine()
     if not engine:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     return {"level": engine.get_level_info()}
 
 
@@ -20,7 +20,7 @@ async def get_level_info():
 async def get_whispers():
     engine = get_engine()
     if not engine:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     try:
         return {"whispers": engine.get_whispers()}
     except Exception as e:
@@ -31,7 +31,7 @@ async def get_whispers():
 async def get_memoir():
     engine = get_engine()
     if not engine:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     return {"memoir": engine.get_full_memoir()}
 
 
@@ -39,7 +39,7 @@ async def get_memoir():
 async def get_reflection():
     engine = get_engine()
     if not engine:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     return {"reflection": engine.get_current_reflection()}
 
 
@@ -47,7 +47,7 @@ async def get_reflection():
 async def get_inventory():
     engine = get_engine()
     if not engine or not engine.player_state:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     return {"summary": engine.item_system.get_inventory_summary(engine.player_state)}
 
 
@@ -55,7 +55,7 @@ async def get_inventory():
 async def get_skill_tree():
     engine = get_engine()
     if not engine:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     tree = engine.skill_tree
     return {
         "available": tree.get_available_skills() if tree else [],
@@ -69,7 +69,7 @@ async def get_skill_tree():
 async def unlock_skill(req: dict):
     engine = get_engine()
     if not engine or not engine.skill_tree:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     slot_id = req.get("slot_id", "")
     result = engine.skill_tree.unlock_skill(slot_id)
     return result
@@ -79,7 +79,7 @@ async def unlock_skill(req: dict):
 async def get_quests():
     engine = get_engine()
     if not engine or not engine.quest_system:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     return {"active": engine.quest_system.get_active_quests()}
 
 
@@ -87,7 +87,7 @@ async def get_quests():
 async def get_reputation():
     engine = get_engine()
     if not engine:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     rep = engine.reputation_system
     return {
         "display": rep.get_reputation_display() if rep else "",
@@ -101,5 +101,5 @@ async def get_context_debug():
     """AI 上下文调试面板数据"""
     engine = get_engine()
     if not engine:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     return engine.get_context_debug()

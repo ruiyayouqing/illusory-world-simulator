@@ -2,6 +2,69 @@ from __future__ import annotations
 import re
 
 
+# [v1.4 P2-10] Prompt injection 防护
+# 玩家输入分隔符 — LLM 看到这两个标记后，应理解其中内容为"数据"而非"指令"
+# 标记本身使用中文 + ASCII 符号，避免与正常玩家输入冲突
+_PLAYER_INPUT_FENCE_OPEN = "<<玩家输入开始>>"
+_PLAYER_INPUT_FENCE_CLOSE = "<<玩家输入结束>>"
+
+# 控制字符 + 零宽字符 + BOM — 这些字符玩家正常输入不会用，但攻击者可用来隐藏指令
+# \x00-\x08, \x0b, \x0c, \x0e-\x1f: C0 控制符（排除 \t \n \r）
+# \u200b-\u200f: 零宽字符（ZWSP/ZWNJ/ZWJ/LRM/RLM）
+# \ufeff: BOM / 零宽不换行空格
+# \u2028, \u2029: 行/段分隔符（可被某些 LLM 解读为换行）
+_CONTROL_CHARS_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\u200b-\u200f\ufeff\u2028\u2029]')
+
+# 常见 prompt injection 触发短语（仅做轻度标记，不删除 — 中文语义过滤误伤率高）
+# 这里不做语义黑名单，依靠 fence 包裹 + system prompt 约束
+
+
+def sanitize_player_input(text: str, max_len: int = 500) -> str:
+    """[v1.4 P2-10] 轻量 player_input 清洗，防止 prompt injection
+
+    做三件事（不做语义过滤，避免误伤中文）：
+      1. 长度截断到 max_len（统一上限，覆盖散落的 [:200]/[:400]）
+      2. 去除控制字符与零宽字符（防 unicode 隐藏指令）
+      3. 用 fence 分隔符包裹，让 LLM 看到玩家输入的边界
+
+    Args:
+        text: 玩家原始输入
+        max_len: 最大长度，默认 500（约 250 个汉字）
+
+    Returns:
+        清洗后的字符串，形如：
+            <<玩家输入开始>>
+            <玩家输入内容>
+            <<玩家输入结束>>
+    """
+    if not text:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+    # 1. 控制字符过滤
+    text = _CONTROL_CHARS_RE.sub("", text)
+    # 2. 长度截断
+    text = text[:max_len]
+    # 3. fence 包裹（告知 LLM 边界，软约束）
+    return f"{_PLAYER_INPUT_FENCE_OPEN}\n{text}\n{_PLAYER_INPUT_FENCE_CLOSE}"
+
+
+def strip_player_input_fence(text: str) -> str:
+    """[v1.4 P2-10] 反向操作：从已包裹的字符串中还原玩家原始输入
+
+    用于二阶读取场景（如 build_history_context 读出 narrative_history 中的 player_input 时）
+    避免双重 fence 包裹。
+    """
+    if not text or _PLAYER_INPUT_FENCE_OPEN not in text:
+        return text
+    start = text.find(_PLAYER_INPUT_FENCE_OPEN)
+    end = text.rfind(_PLAYER_INPUT_FENCE_CLOSE)
+    if start == -1 or end == -1 or end <= start:
+        return text
+    inner = text[start + len(_PLAYER_INPUT_FENCE_OPEN):end].strip("\n")
+    return inner
+
+
 def substitute_params(template: str, **kwargs) -> str:
     """统一变量替换系统：{{var}} → value"""
     if not template:

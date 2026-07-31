@@ -139,18 +139,28 @@ function applyThemeConfig(ui) {
   }
   // 记录当前主题名，供 showGame() 等函数判断使用
   window._currentThemeName = ui.theme || 'obsidian';
+  // 设置 --theme CSS 变量，供 showGame() 读取
+  root.style.setProperty('--theme', ui.theme || 'obsidian');
 }
 
 function previewTheme() {
   var name = $('st_th').value;
+  applyThemeConfig({ theme: name, font_size: getCurrentFontSize() });
   var t = getTheme(name);
   var box = $('tp_box');
-  box.style.background = t.panel;
-  box.style.border = '1px solid ' + t.border;
-  box.style.borderRadius = '6px';
-  $('tp_title').style.color = t.gold;
-  $('tp_text').style.color = t.text;
-  $('tp_dim').style.color = t.dim;
+  if (box) {
+    box.style.background = t.panel;
+    box.style.border = '1px solid ' + t.border;
+    box.style.borderRadius = '6px';
+    $('tp_title').style.color = t.gold;
+    $('tp_text').style.color = t.text;
+    $('tp_dim').style.color = t.dim;
+  }
+}
+
+function getCurrentFontSize() {
+  var fs = $('st_fs');
+  return fs ? fs.value : 'medium';
 }
 
 async function loadSettings() {
@@ -161,7 +171,7 @@ async function loadSettings() {
     // [P3-8] 使用共享模块填充 DOM
     fillDOMFromConfig(c);
     // 叙事风格（非通用字段，仍在此处理）
-    var ns = c.game?.narrative_style || '网文爽文';
+    var ns = c.game?.narrative_style || '真人作者';
     var sel = $('st_narrative_style');
     if (ns === '自定义') {
       sel.value = '自定义';
@@ -230,7 +240,7 @@ function loadV10Settings(c) {
   // 蝴蝶审批门
   var bf = v10.butterfly_approval_gate || {};
   var bfEl = $('st_v10_butterfly_enabled');
-  if (bfEl) bfEl.checked = bf.enabled === true;
+  if (bfEl) bfEl.checked = bf.enabled !== false;
   var bfTh = $('st_v10_butterfly_threshold');
   if (bfTh) bfTh.value = bf.approval_threshold || 7.0;
   // 分层记忆
@@ -432,6 +442,118 @@ async function deleteProfile(target) {
   } catch(e) { alert('删除失败'); }
 }
 
+// [Bug5] 测试大模型联通性
+async function testConnection(modelType) {
+  // 根据模型类型获取对应的输入框值
+  var keyMap = {
+    'llm':       { key: 'st_lk',       url: 'st_lb', model: 'st_lm',       btn: 'btn_test_llm',       result: 'test_result_llm' },
+    'cheap':     { key: 'st_cheap_lk', url: 'st_cheap_lb', model: 'st_cheap_lm', btn: 'btn_test_cheap', result: 'test_result_cheap' },
+    'dialogue':  { key: 'st_dlg_lk',   url: 'st_dlg_lb', model: 'st_dlg_lm',   btn: 'btn_test_dlg',     result: 'test_result_dlg' },
+    'image':     { key: 'st_ik',       url: 'st_iu', model: 'st_im',          btn: 'btn_test_image',    result: 'test_result_image' },
+    'embedding': { key: 'st_ek',       url: 'st_eu', model: 'st_em',          btn: 'btn_test_embedding', result: 'test_result_embedding' },
+  };
+  var m = keyMap[modelType];
+  if (!m) return;
+  var apiKey = $(m.key).value;
+  var baseUrl = $(m.url).value;
+  var modelName = $(m.model).value;
+  var btn = $(m.btn);
+  var resultBox = $(m.result);
+
+  if (!apiKey) { showTestResult(resultBox, false, 'API Key 为空'); return; }
+  if (!baseUrl) { showTestResult(resultBox, false, 'Base URL 为空'); return; }
+  if (!modelName) { showTestResult(resultBox, false, '模型名称为空'); return; }
+
+  // 设置按钮为测试中状态
+  btn.disabled = true;
+  btn.textContent = '⏳ 测试中...';
+  resultBox.style.display = 'block';
+  resultBox.style.background = 'rgba(212,175,55,.1)';
+  resultBox.style.color = 'var(--gold)';
+  resultBox.textContent = '正在测试连通性，请稍候...';
+
+  try {
+    var res = await api('POST', '/api/test-llm-connection', {
+      api_key: apiKey,
+      base_url: baseUrl,
+      model_name: modelName,
+      model_type: modelType
+    });
+    if (res && res.ok) {
+      showTestResult(resultBox, true, '✅ ' + (res.msg || '连接成功'));
+    } else {
+      showTestResult(resultBox, false, '❌ ' + (res && res.msg ? res.msg : '连接失败'));
+    }
+  } catch(e) {
+    showTestResult(resultBox, false, '❌ 请求失败: ' + (e.message || e));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔌 测试联通';
+  }
+}
+
+function showTestResult(resultBox, ok, msg) {
+  resultBox.style.display = 'block';
+  if (ok) {
+    resultBox.style.background = 'rgba(46,125,50,.15)';
+    resultBox.style.color = '#1a1a1a';
+  } else {
+    resultBox.style.background = 'rgba(198,40,40,.15)';
+    resultBox.style.color = '#e07a7a';
+  }
+  resultBox.textContent = msg;
+}
+
+// [共享分发] 一键清除所有模型 API Key（当前配置 + 已保存 profile）
+async function clearAllKeys() {
+  if (!confirm('确认清除所有模型的 API Key？\n\n将清除：主力/备用/对话/文生图/向量 共 5 个模型的当前 Key，以及所有已保存配置档案中的 Key。\n\n其他设置（调用地址、模型名等）保留不变。\n\n此操作不可撤销，请确认。')) {
+    return;
+  }
+  var btn = $('btn_clear_all_keys');
+  var resultBox = $('clear_keys_result');
+  if (!btn || !resultBox) return;
+  btn.disabled = true;
+  btn.textContent = '⏳ 清除中...';
+  resultBox.style.display = 'block';
+  resultBox.style.background = 'rgba(212,175,55,.1)';
+  resultBox.style.color = 'var(--gold)';
+  resultBox.textContent = '正在清除所有 Key...';
+  try {
+    var res = await api('POST', '/api/clear-all-keys', {});
+    if (res && res.status === 'ok') {
+      // 同步清空前端 5 个输入框
+      var keyIds = ['st_lk', 'st_cheap_lk', 'st_dlg_lk', 'st_ik', 'st_ek'];
+      keyIds.forEach(function(id) {
+        var el = $(id);
+        if (el) el.value = '';
+      });
+      // 如果有 Alpine 绑定，同步清空 config 对象
+      if (window.settingsPanel && window.settingsPanel.config) {
+        ['llm', 'cheap_llm', 'dialogue_llm', 'image', 'embedding'].forEach(function(s) {
+          if (window.settingsPanel.config[s]) window.settingsPanel.config[s].api_key = '';
+        });
+      }
+      // 重新加载 profiles 下拉（让显示的脱敏 Key 也刷新）
+      try { await loadProfiles(); } catch(e) {}
+      var total = (res.total != null) ? res.total : (res.cleared_current + res.cleared_profiles);
+      resultBox.style.background = 'rgba(76,175,80,.12)';
+      resultBox.style.color = '#7fd07f';
+      resultBox.textContent = '✅ 已清除 ' + total + ' 个 Key（当前配置 ' + res.cleared_current + ' 个 + 配置档案 ' + res.cleared_profiles + ' 个）';
+    } else {
+      resultBox.style.background = 'rgba(198,40,40,.15)';
+      resultBox.style.color = '#e07a7a';
+      resultBox.textContent = '❌ 清除失败：' + (res && res.error ? res.error : '未知错误');
+    }
+  } catch(e) {
+    resultBox.style.background = 'rgba(198,40,40,.15)';
+    resultBox.style.color = '#e07a7a';
+    resultBox.textContent = '❌ 请求失败：' + (e.message || e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🧹 清除所有 KEY';
+  }
+}
+
 async function saveSettings() {
   var styleName = $('st_narrative_style').value;
   var customText = styleName === '自定义' ? $('st_custom_style').value : '';
@@ -442,7 +564,6 @@ async function saveSettings() {
   if (styleRes && styleRes.error) {
     console.error('保存叙事风格失败', styleRes.error);
   }
-
   var config = collectConfigFromDOM();
   var body = buildFullSettingsBody(config);
   
@@ -524,8 +645,9 @@ var STYLE_DESCRIPTIONS = {
   '半古半文': '文言句式与白话叙事交融，类似《明朝那些事儿》或《琅琊榜》的风格。句式简练有力，偶用典故，但不晦涩。',
   '大白话': '现代口语化叙事，轻松幽默，像朋友在讲故事。短句为主，偶尔吐槽，贴近当代网文读者的阅读习惯。',
   '严肃文学': '冷峻克制的文学风格，类似余华、莫言。注重细节描写和心理刻画，语言凝练，情感内敛。',
-  '网文爽文': '快节奏网文风格，爽点密集，系统提示频繁。数据化呈现，升级打怪。语言直白有力，每段都有钩子。',
-  '诗化散文': '意境优先的散文风格，类似迟子建的作品。注重景物描写和氛围营造，语言优美，富有诗意。'
+  '网文爽文': '快节奏网文风格，爽点密集，奇遇连连。主角光环明显，升级打怪，装逼打脸。语言直白有力，每段都有钩子。',
+  '诗化散文': '意境优先的散文风格，类似《额尔古纳右岸》或迟子建的作品。注重景物描写和氛围营造，语言优美，富有诗意。节奏缓慢，适合沉浸式体验。',
+  '真人作者': '不要堆砌华丽辞藻，叙事以「说清楚事」为第一要务。对话占比高、信息密度大、承担推进剧情/传递世界观/塑造人物三重功能。大量内心独白展开思维过程。第三人称全知视角，多视角自由切换制造信息差。配角有目标与动机，非工具人。长句为主，多重从句嵌套。幽默为结构性节奏工具。'
 };
 
 function onStyleChange() {
@@ -562,7 +684,7 @@ async function handleStyleFile(input) {
   try {
     // [Bug] 添加认证头，避免被安全中间件拦截
     var headers = {};
-    if (window._accessToken) headers['Authorization'] = 'Bearer ' + window._accessToken;
+    if (window.ACCESS_TOKEN) headers['Authorization'] = 'Bearer ' + window.ACCESS_TOKEN;
     var resp = await fetch('/api/narrative-style/upload', { method: 'POST', body: fd, headers: headers });
     var d = await resp.json();
     if (d.error) { info.textContent = '❌ ' + d.error; return; }
@@ -593,7 +715,7 @@ async function handleFileUpload(input) {
   try {
     // [Bug] 添加认证头，避免被安全中间件拦截
     var headers = {};
-    if (window._accessToken) headers['Authorization'] = 'Bearer ' + window._accessToken;
+    if (window.ACCESS_TOKEN) headers['Authorization'] = 'Bearer ' + window.ACCESS_TOKEN;
     var resp = await fetch('/api/upload-description', { method: 'POST', body: fd, headers: headers });
     var d = await resp.json();
     if (d.error) { info.textContent = '❌ ' + d.error; return; }

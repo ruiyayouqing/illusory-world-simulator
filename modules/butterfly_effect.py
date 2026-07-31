@@ -4,7 +4,7 @@ import uuid
 import logging
 from .schemas import WorldState, PlayerState, MacroEvent
 from .llm.base_llm import BaseLLM
-from .prompt_utils import resolve_location_name  # [Bug] location code → display name
+from .prompt_utils import resolve_location_name, sanitize_player_input  # [Bug] location code → display name | [v1.4 P2-10] Prompt injection 防护
 
 logger = logging.getLogger("chronoverse.butterfly")
 
@@ -19,6 +19,13 @@ class ButterflyEffect:
         self.approval_threshold: float = 7.0      # 触发审批的影响分数阈值
         self.pending_approvals: list[dict] = []    # 待审批的后果
         self.approval_history: list[dict] = []     # 审批历史
+        # [NovelRoleplay] 小说扮演偏离度追踪
+        # 当偏离度超过 divergence_threshold 时，既定未来事件自动失效（剧情进入自由推演）
+        self.novel_divergence_score: float = 0.0
+        self.divergence_threshold: float = 30.0  # 偏离度阈值（累积）
+        self.divergence_actions: list[dict] = []  # 记录导致偏离的具体行为
+        self.invalidated_future_events: list[str] = []  # 已失效的既定未来事件 ID
+        self._novel_mode: bool = False  # 是否处于小说扮演模式
 
     def record_action(self, player: PlayerState, action: str,
                       result: str, day: int):
@@ -32,6 +39,134 @@ class ButterflyEffect:
         self.player_actions_history.append(entry)
         if len(self.player_actions_history) > 100:
             self.player_actions_history = self.player_actions_history[-100:]
+
+    # ── [NovelRoleplay] 小说扮演偏离度追踪 ──────────────────────
+
+    def enable_novel_mode(self, threshold: float = 30.0):
+        """[NovelRoleplay] 启用小说扮演偏离度追踪。
+        在 enter_roleplay 时调用，开启后玩家行为会累积偏离度。"""
+        self._novel_mode = True
+        self.divergence_threshold = threshold
+        self.novel_divergence_score = 0.0
+        self.divergence_actions = []
+        self.invalidated_future_events = []
+        logger.info("[NovelRoleplay] 偏离度追踪已启用，阈值=%.1f", threshold)
+
+    def disable_novel_mode(self):
+        """退出小说扮演模式"""
+        self._novel_mode = False
+
+    def record_novel_divergence(self, action: str, divergence_score: float,
+                                  reason: str, day: int,
+                                  affected_future_events: list[str] = None):
+        """[NovelRoleplay] 记录一次对原著剧情的偏离。
+        玩家行为若改变了原著既定走向，调用此方法累积偏离度。
+        当累积偏离度超过阈值时，既定未来事件自动失效。
+
+        参数：
+            action: 玩家行为描述
+            divergence_score: 本次偏离分数（0-10，越大越偏离）
+            reason: 偏离原因
+            day: 游戏天数
+            affected_future_events: 直接受影响的既定未来事件 time_id 列表
+        """
+        if not self._novel_mode:
+            return
+        self.novel_divergence_score += divergence_score
+        record = {
+            "day": day,
+            "action": action[:100],
+            "divergence_score": divergence_score,
+            "reason": reason[:200],
+            "affected_future_events": affected_future_events or [],
+            "cumulative_score": self.novel_divergence_score,
+        }
+        self.divergence_actions.append(record)
+        if len(self.divergence_actions) > 50:
+            self.divergence_actions = self.divergence_actions[-50:]
+
+        # 直接受影响的事件立即失效
+        for ev_id in (affected_future_events or []):
+            if ev_id not in self.invalidated_future_events:
+                self.invalidated_future_events.append(ev_id)
+
+        logger.info("[NovelRoleplay] 偏离度 +%s (累积 %.1f/%.1f): %s",
+                    divergence_score, self.novel_divergence_score,
+                    self.divergence_threshold, reason[:50])
+
+        # 超过阈值时，标记全部既定未来失效
+        if self.novel_divergence_score >= self.divergence_threshold:
+            self._invalidate_all_future_events()
+
+    def _invalidate_all_future_events(self):
+        """[NovelRoleplay] 偏离度超阈值，既定未来全部失效，剧情进入自由推演。
+        此方法只设置标记，实际的伏笔解决由调用方根据 invalidated_future_events 列表处理。"""
+        if not self._novel_mode:
+            return
+        logger.warning(
+            "[NovelRoleplay] 偏离度 %.1f 超过阈值 %.1f，既定未来全部失效！"
+            "剧情进入自由推演模式。",
+            self.novel_divergence_score, self.divergence_threshold
+        )
+        # 标记：后续检查到此标志时，所有 novel_future 伏笔都应被解决/失效
+        # 实际的伏笔失效由 turn_processor 调用 check_and_invalidate_future_foreshadows 完成
+
+    def check_and_invalidate_future_foreshadows(self, foreshadow_lifecycle,
+                                                  current_day: int) -> list[str]:
+        """[NovelRoleplay] 检查并失效已超阈值的既定未来伏笔。
+        在 turn_processor 每回合调用。
+
+        返回：本次失效的伏笔 hook_id 列表
+        """
+        if not self._novel_mode or not foreshadow_lifecycle:
+            return []
+
+        invalidated = []
+        # 如果偏离度超阈值，失效所有 novel_future 伏笔
+        if self.novel_divergence_score >= self.divergence_threshold:
+            for hook_id, hook in list(foreshadow_lifecycle.hooks.items()):
+                if (hook.status in ("active", "mentioned")
+                    and "novel_future" in (hook.tags or [])):
+                    try:
+                        foreshadow_lifecycle.resolve(
+                            hook_id, current_day,
+                            resolution=f"偏离度超阈值({self.novel_divergence_score:.1f})，既定未来失效"
+                        )
+                        invalidated.append(hook_id)
+                    except Exception as e:
+                        logger.warning("失效伏笔 %s 失败: %s", hook_id, e)
+
+        # 失效直接被影响的伏笔（通过 time_id 标签匹配）
+        for ev_id in self.invalidated_future_events:
+            tag_to_match = f"timeline_{ev_id}"
+            for hook_id, hook in list(foreshadow_lifecycle.hooks.items()):
+                if (hook.status in ("active", "mentioned")
+                    and tag_to_match in (hook.tags or [])
+                    and hook_id not in invalidated):
+                    try:
+                        foreshadow_lifecycle.resolve(
+                            hook_id, current_day,
+                            resolution=f"玩家行为直接影响，既定事件 {ev_id} 失效"
+                        )
+                        invalidated.append(hook_id)
+                    except Exception as e:
+                        logger.warning("失效伏笔 %s 失败: %s", hook_id, e)
+
+        if invalidated:
+            logger.info("[NovelRoleplay] 本回合失效 %d 条既定未来伏笔", len(invalidated))
+        return invalidated
+
+    def get_divergence_summary(self) -> dict:
+        """[NovelRoleplay] 获取偏离度摘要"""
+        return {
+            "novel_mode": self._novel_mode,
+            "divergence_score": round(self.novel_divergence_score, 1),
+            "threshold": self.divergence_threshold,
+            "exceeded": self.novel_divergence_score >= self.divergence_threshold,
+            "divergence_count": len(self.divergence_actions),
+            "invalidated_events_count": len(self.invalidated_future_events),
+            "recent_divergences": self.divergence_actions[-5:],
+        }
 
     def evaluate_impact(self, player: PlayerState, action: str,
                         world_state: WorldState) -> dict:
@@ -48,10 +183,12 @@ class ButterflyEffect:
         locations_text = ", ".join(resolve_location_name(k, world_state) for k in world_state.locations.keys()) if world_state.locations else "无地点信息"
         memory_text = "; ".join(player.memory.short_term[-5:]) if player.memory and player.memory.short_term else "无记忆"
 
+        # [v1.4 P2-10] Prompt injection 防护
+        safe_action = sanitize_player_input(action)
         prompt = f"""评估玩家行为对世界的蝴蝶效应影响。
 
 【玩家行为】
-{action}
+{safe_action}
 
 【玩家信息】
 姓名: {player.name}, 身份: {player.social.position}
@@ -362,6 +499,12 @@ class ButterflyEffect:
             "approval_threshold": self.approval_threshold,
             "pending_approvals": self.pending_approvals,
             "approval_history": self.approval_history[-20:],
+            # [NovelRoleplay] 小说扮演偏离度追踪
+            "novel_divergence_score": self.novel_divergence_score,
+            "divergence_threshold": self.divergence_threshold,
+            "divergence_actions": self.divergence_actions[-20:],
+            "invalidated_future_events": self.invalidated_future_events,
+            "novel_mode": self._novel_mode,
         }
 
     def from_dict(self, data: dict):
@@ -371,3 +514,9 @@ class ButterflyEffect:
         self.approval_threshold = data.get("approval_threshold", 7.0)
         self.pending_approvals = data.get("pending_approvals", [])
         self.approval_history = data.get("approval_history", [])
+        # [NovelRoleplay] 恢复小说扮演偏离度追踪
+        self.novel_divergence_score = data.get("novel_divergence_score", 0.0)
+        self.divergence_threshold = data.get("divergence_threshold", 30.0)
+        self.divergence_actions = data.get("divergence_actions", [])
+        self.invalidated_future_events = data.get("invalidated_future_events", [])
+        self._novel_mode = data.get("novel_mode", False)

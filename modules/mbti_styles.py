@@ -149,6 +149,46 @@ def modify_social_chance(base_chance: float, mbti_code: str) -> float:
     return min(1.0, base_chance * (0.5 + profile.social_frequency))
 
 
+# ── MBTI → 决策风格映射 ─────────────────────────────────
+# 5 种决策风格：normal(普通) / cautious(谨慎) / aggressive(激进) /
+#               passive(被动) / cunning(狡诈)
+# 根据 MBTI 类型的风险偏好、决策速度、社交倾向等综合特征映射
+MBTI_TO_DECISION_STYLE: dict[str, str] = {
+    # 分析师 (NT) — 战略型
+    "INTJ": "cunning",      # 建筑师 — 深谋远虑，善于布局
+    "INTP": "cautious",     # 逻辑学家 — 深思熟虑，行事审慎
+    "ENTJ": "cunning",      # 指挥官 — 权谋果断，野心勃勃
+    "ENTP": "aggressive",   # 辩论家 — 敢于冒险，喜欢挑战
+
+    # 外交官 (NF) — 理想型
+    "INFJ": "cautious",     # 提倡者 — 深谋远虑，行事审慎
+    "INFP": "passive",      # 调停者 — 温和退让，避免冲突
+    "ENFJ": "normal",       # 主人公 — 平衡协调，善于社交
+    "ENFP": "aggressive",   # 竞选者 — 热情冒险，勇于尝试
+
+    # 守卫者 (SJ) — 传统型
+    "ISTJ": "cautious",     # 物流师 — 严谨守序，步步为营
+    "ISFJ": "passive",      # 守卫者 — 温和奉献，不善争锋
+    "ESTJ": "cunning",      # 总经理 — 善于管理，精于算计
+    "ESFJ": "normal",       # 执政官 — 随和热心，善于社交
+
+    # 探险家 (SP) — 行动型
+    "ISTP": "aggressive",   # 鉴赏家 — 冷静冒险，敢于行动
+    "ISFP": "passive",      # 探险家 — 随性自由，不爱争斗
+    "ESTP": "aggressive",   # 企业家 — 大胆果敢，勇猛向前
+    "ESFP": "normal",       # 表演者 — 随性乐观，享受当下
+}
+
+
+def mbti_to_decision_style(mbti_code: str) -> str:
+    """将 MBTI 类型映射为决策风格（normal/cautious/aggressive/passive/cunning）。
+
+    用于在创建 NPC 时根据 MBTI 类型自动设置 ai_behavior.decision_style，
+    而非一刀切默认 "normal"。
+    """
+    return MBTI_TO_DECISION_STYLE.get(mbti_code, "normal")
+
+
 def modify_exploration_chance(base_chance: float, mbti_code: str) -> float:
     """根据 MBTI 类型调整探索概率"""
     profile = MBTI_PROFILES.get(mbti_code)

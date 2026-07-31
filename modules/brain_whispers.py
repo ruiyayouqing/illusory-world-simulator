@@ -115,8 +115,23 @@ class BrainWhispers:
     ]
 }}"""
         response = self.llm.chat_json(prompt, temperature=0.8)
-        for w in response.get("whispers", []):
-            whispers.append({**w, "source": "llm"})
+        llm_whispers = response.get("whispers", []) if isinstance(response, dict) else []
+        for w in llm_whispers:
+            if isinstance(w, dict) and w.get("text"):
+                whispers.append({**w, "source": "llm"})
+
+        # [Bug] LLM 失败/返回空时，补一条系统兜底，避免点击后无任何输出
+        if not whispers:
+            fallback_texts = [
+                "你深吸一口气，让纷乱的思绪暂时平息下来。",
+                "脑海中闪过几个念头，又被你按了下去。",
+                "你皱了皱眉，似乎在琢磨什么。",
+            ]
+            whispers.append({
+                "category": "system",
+                "text": random.choice(fallback_texts),
+                "source": "fallback",
+            })
 
         random.shuffle(whispers)
         selected = whispers[:3]

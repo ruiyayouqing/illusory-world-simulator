@@ -127,6 +127,10 @@ class NPCState(BaseModel):
 
     # [Bug] 每日行动限制：记录上次行动的游戏天数，防止NPC一天内多次行动/搬家
     last_action_day: int = 0
+    # [v1.2] 时序轮询：记录上次行动的时段标识（格式 "day:time_slot"），
+    # 让 NPC 每个时段最多行动1次，配合 daily_routine 实现时段感知
+    # 空字符串表示从未行动过（老存档兼容）
+    last_action_turn: str = ""
 
     mbti_type: str = ""  # MBTI 性格类型（如 INTJ），影响决策风格
 
@@ -151,6 +155,57 @@ class NPCState(BaseModel):
     # [v10++] 角色动态状态（CHIRON 式）：可选字段，由 CharacterStateManager 统一管理
     # 此字段仅用于持久化兜底，运行时优先使用 CharacterStateManager
     dynamic_state: dict = Field(default_factory=dict)
+
+    # [NovelRoleplay] 小说扮演扩展：支持「未来角色」全量注入 + 概率登场 + 知识边界
+    # is_dormant=True 的 NPC 不会出现在场景中、不会被 NPCAgent 主循环处理，
+    # 直到登场条件满足后才会被激活。
+    is_dormant: bool = False
+    # [v1.2] 休眠开始日（is_dormant 翻转为 True 时记录，唤醒时用于计算休眠时长）
+    # 唤醒时调用 LLM 做时间跳跃推演，输入休眠时长 + 期间世界大事，补齐断层
+    dormant_since_day: int = 0
+    # 登场条件：原著章节/地点/事件/概率，满足任一组合即可激活
+    # {"min_chapter": int, "locations": [str], "trigger_events": [str],
+    #  "probability_per_day": float, "min_day_offset": int}
+    appearance_conditions: dict = Field(default_factory=dict)
+    # 知识边界（目标感知模式）：NPC 知道自己的目标和动机，但不知道具体未来事件
+    # {"knows_goals": [str], "knows_facts": [str], "forbidden_knowledge": [str]}
+    knowledge_scope: dict = Field(default_factory=dict)
+    # 原著中的出场章节（用于判断是否为「未来角色」）
+    original_chapter: int = -1
+    # 原著未来事件摘要（仅系统层使用，不直接进入 NPC 的可见记忆）
+    # 格式：[{"chapter": int, "event": str, "importance": float}, ...]
+    original_future: list = Field(default_factory=list)
+
+    # [v1.3] NPC 性格演化轨迹（全模式通用）
+    # 记录性格转折点：重大事件触发的性格重塑
+    # 格式：[{"turn": int, "day": int, "trauma": str, "from_traits": [str],
+    #        "to_traits": [str], "narrative": str, "trigger_event": str}, ...]
+    personality_history: list[dict] = Field(default_factory=list)
+    # [v1.3] NPC 私密档案（全模式通用，普通模式由开关控制）
+    # 格式：[{"fact": str, "type": "secret/past/preference/wish", "created_day": int}, ...]
+    private_facts: list[dict] = Field(default_factory=list)
+    # [v1.3] 标记是否已生成过私密档案（避免重复生成）
+    private_facts_generated: bool = False
+
+    # ===== [v1.5 第二期] 动机/立场/血缘 =====
+    # 6 类动机：survival/social/career/exploration/legacy/transcendence
+    # 格式：[{"type": str, "intensity": int, "target": str, "triggered_day": int,
+    #        "decay_rate": float, "reason": str}, ...]
+    motivations: list[dict] = Field(default_factory=list)
+
+    # 立场名誉（懒加载默认值，老存档兼容）
+    alignment: str = "中庸"            # 仁善/刚正/中庸/无畏/桀骜/狂邪/唯我
+    faction_id: str | None = None      # 所属势力 id
+    personal_reputation: int = 0       # 个人名誉 -100~+100
+    # 对各势力的声望：{faction_id: standing -100~+100}
+    faction_standing: dict[str, int] = Field(default_factory=dict)
+
+    # 血缘家族（懒加载默认值，老存档兼容）
+    family_id: str | None = None
+    parents: list[str] = Field(default_factory=list)   # NPC id 列表
+    spouse: str | None = None                          # NPC id
+    children: list[str] = Field(default_factory=list)  # NPC id 列表
+    siblings: list[str] = Field(default_factory=list)  # NPC id 列表（含同门）
 
     def record_role_change(self, new_role: str, reason: str, day: int):
         """记录一次身份变更"""
@@ -204,6 +259,12 @@ class NPCState(BaseModel):
 class Faction(BaseModel):
     power: int = 50
     stability: int = 50
+    # [v1.5 第二期] 立场名誉系统扩展（向后兼容，老存档默认值）
+    ideology: str = "中庸"               # 意识形态：仁善/刚正/中庸/无畏/桀骜/狂邪/唯我
+    leader: str = ""                      # 族长/首领 NPC id
+    members: list[str] = Field(default_factory=list)  # 成员 NPC id 列表
+    enemies: list[str] = Field(default_factory=list)  # 敌对势力 id 列表
+    allies: list[str] = Field(default_factory=list)   # 盟友势力 id 列表
 
 
 class AMMPoolState(BaseModel):
@@ -394,3 +455,23 @@ class LearningRecord(BaseModel):
     importance: float = 0.5
     applied_count: int = 0
     created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+
+
+class NpcDialogueSession(BaseModel):
+    """[v1.6] NPC-NPC 对话会话记录（用于持久化与「江湖见闻」展示）"""
+    session_id: str
+    day: int
+    time: str = ""
+    location: str = ""
+    location_name: str = ""
+    scene_type: str = ""              # encounter/discuss/conflict/smalltalk/confide/group
+    scene_name: str = ""
+    participants: list[dict] = Field(default_factory=list)
+    # 每条 dialogue: {speaker, content, emotion, action}
+    dialogue: list[dict] = Field(default_factory=list)
+    summary: str = ""
+    relation_change: dict = Field(default_factory=dict)
+    topic_tags: list[str] = Field(default_factory=list)
+    player_witnessed: bool = False
+    # 传闻流用：是否已传播给玩家
+    delivered_to_player: bool = False

@@ -16,8 +16,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +30,8 @@ from .llm.mimo_llm import MimoLLM
 from .llm.router import LLMRouter, BaseLLM, TASK_DIALOGUE, TASK_SIMPLE
 from .db.chroma_db import MemoryStore
 from .core.task_queue import BackgroundTaskQueue
+from .core.resilience import safe_call
+from .core.timing import TimingCollectorInstance
 from .data.safe_io import atomic_write_json, load_json_safe
 from .registry import ServiceRegistry, create_services, trigger_hook, _load_plugins
 from .lorebook import Lorebook
@@ -50,11 +50,15 @@ from .engine_save_mixin import SaveMixin
 from .engine_world_mixin import WorldGenMixin
 from .engine_card_mixin import CharacterCardMixin
 from .engine_query_mixin import SubsystemQueryMixin
+# [v1.4 P1-5] Facade Mixin：元数据/统计查询
+from .engine_meta_mixin import MetaFacadeMixin
+# [v1.4 P1-5] Facade Mixin：NPC 交互
+from .engine_npc_mixin import NpcFacadeMixin
 
 logger = logging.getLogger("chronoverse")
 
 
-class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMixin):
+class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMixin, MetaFacadeMixin, NpcFacadeMixin):
     # [v10] 叙事历史上限 — 仅触发摘要生成，不再替换/截断原始记录
     MAX_NARRATIVE_HISTORY = 500
     NARRATIVE_HISTORY_KEEP = 500
@@ -157,6 +161,11 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         # [v10+] 混合检索（BM25 + 向量 + GraphRAG）
         self.bm25_retriever = None
         self.hybrid_retriever = None
+        # [v1.6 P1-5] CRAG + HyDE 检索管道
+        self.crag_hyde_pipeline = None
+        self.retrieval_audit = None
+        # [v1.6 P1-8] 情感记忆管理器
+        self.emotional_memory_manager = None
         # [v10+] 叙事场景检测器（GraphRAG 动态启停）
         self.scene_detector = None
         # [v11] 蝴蝶效应异步结果缓存（下回合应用）
@@ -167,6 +176,8 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         self.multi_agent_narrative = None
         # [v10++] MCP 工具协议层（Model Context Protocol 兼容）
         self.mcp_registry = None
+        # [v1.6] NPC-NPC 对话编排器
+        self.npc_dialogue_manager = None
 
         # [v9] 回合处理器和世界管理器（延迟初始化）
         self._turn_processor = None
@@ -200,6 +211,37 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         self.npc_registry: NpcRegistry = NpcRegistry(max_passersby=10)
         # [v10+++] 异步 NPC 生成器（懒加载，首次调用时创建）
         self._npc_spawner = None
+        # [v1.3] 因果链图（用于 debug 可视化）
+        from .causal_graph import CausalGraph
+        self.causal_graph: CausalGraph = CausalGraph(min_importance=6.0, max_nodes=500)
+        # [v1.3] 统一多md记忆骨架（MemoryBriefManager）
+        from .memory_brief import MemoryBriefManager
+        self.memory_brief: MemoryBriefManager = MemoryBriefManager(
+            llm=None, saves_dir=str(self.save_manager.base_dir)
+        )
+        # [v1.5 第一期] 世界事件 / 玩家事件总线 + 世界时钟
+        # 实例化时 world_id 未知，先置 None；create_new_game / load_game 时按 world_id 创建实例
+        from .world_event import PlayerEventBus, WorldEventBus
+        from .world_tick import WorldTick
+        self.player_event_bus: PlayerEventBus | None = None
+        self.world_event_bus: WorldEventBus | None = None
+        self.world_tick: WorldTick | None = None
+        self.last_day_events: dict | None = None
+        # [v1.2] 自主运行引擎（懒加载：首次访问时创建，避免循环依赖）
+        self._auto_run_engine = None
+
+    def _init_world_event_bus(self, world_id: str) -> None:
+        """[v1.5 第一期] 按 world_id 初始化事件总线 + 世界时钟
+        在 create_new_game / load_game / _load_game_state 中调用
+        """
+        from .world_event import PlayerEventBus, WorldEventBus
+        from .world_tick import WorldTick
+        world_dir = self.save_manager.base_dir / world_id
+        events_dir = world_dir / "state"
+        events_dir.mkdir(parents=True, exist_ok=True)
+        self.player_event_bus = PlayerEventBus(events_dir / "events.json")
+        self.world_event_bus = WorldEventBus(events_dir / "events_world.json")
+        self.world_tick = WorldTick(self)
 
     @property
     def npc_spawner(self):
@@ -238,11 +280,42 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             try:
                 callback(**kwargs)
             except Exception as e:
-                logger.warning("Plugin hook '%s' error: %s", hook_name, e)
+                logger.warning("Plugin hook '%s' error: %s", hook_name, e, exc_info=True)
         # 回退：若实例级表完全为空（未加载插件），尝试全局表
         if not hooks:
             from .registry import trigger_hook as _global_trigger
             _global_trigger(hook_name, **kwargs)
+
+    def _bg(self, func, *args, **kwargs):
+        """[v1.7 P2-3] 安全后台执行：有 task_queue 就异步，否则同步执行。
+
+        与 TurnProcessorV2._bg 逻辑一致，供 game_engine 后处理使用。
+        [P4-A-1] 增加 async 函数的同步回退支持（asyncio.gather wrapper 投递时需要）。
+        """
+        import asyncio as _aio
+        func_name = getattr(func, '__name__', 'unknown')
+        if hasattr(self, 'task_queue') and self.task_queue is not None:
+            try:
+                self.task_queue.post(func, *args, **kwargs)
+                return
+            except Exception as e:
+                logger.warning("后台队列投递失败 [%s]: %s, 改为同步执行", func_name, e, exc_info=True)
+        try:
+            if _aio.iscoroutinefunction(func):
+                # [P4-A-1] async 函数回退：尝试在已有事件循环中执行，否则新建
+                try:
+                    loop = _aio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop and loop.is_running():
+                    # 已有运行中的循环（不应在同步路径出现），创建任务但不等待
+                    loop.create_task(func(*args, **kwargs))
+                else:
+                    _aio.run(func(*args, **kwargs))
+            else:
+                func(*args, **kwargs)
+        except Exception as e:
+            logger.warning("后台任务执行失败 [%s]: %s", func_name, e, exc_info=True)
 
     # ── [v10.5] 懒加载服务属性 ──────────────────────────────
     # 这些工具型服务仅在特定 API 端点首次调用时创建，减少启动开销
@@ -325,7 +398,7 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                 from .security import decrypt_config_keys
                 self._config_cache = decrypt_config_keys(raw)
             except Exception as e:
-                logger.warning("Failed to load config.json: %s", e)
+                logger.warning("Failed to load config.json: %s", e, exc_info=True)
                 self._config_cache = {}
         else:
             self._config_cache = {}
@@ -427,6 +500,9 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             # [v10+] 混合检索（BM25 + 向量 + GraphRAG）
             self.bm25_retriever = svc.bm25_retriever
             self.hybrid_retriever = svc.hybrid_retriever
+            # [v1.6 P1-5] CRAG + HyDE 检索管道
+            self.crag_hyde_pipeline = getattr(svc, "crag_hyde_pipeline", None)
+            self.retrieval_audit = getattr(svc, "retrieval_audit", None)
             # [v10+] 叙事场景检测器（GraphRAG 动态启停）
             self.scene_detector = svc.scene_detector
             # [v10++] Agent 自主记忆管理（MemGPT/Letta 式）
@@ -442,7 +518,14 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                     register_builtin_tools(self.mcp_registry, engine=self)
                     logger.info("MCP builtin tools registered with GameEngine")
                 except Exception as e:
-                    logger.warning("Failed to register MCP builtin tools: %s", e)
+                    logger.warning("Failed to register MCP builtin tools: %s", e, exc_info=True)
+            # [v1.6] NPC-NPC 对话编排器
+            self.npc_dialogue_manager = svc.npc_dialogue_manager
+            # [v1.6 P1-6] 长期记忆 LLM 摘要器 + 审计日志单例
+            self.long_term_memory_summarizer = getattr(svc, "long_term_memory_summarizer", None)
+            self.memory_audit_log = getattr(svc, "memory_audit_log", None)
+            # [v1.6 P1-8] 情感记忆管理器
+            self.emotional_memory_manager = getattr(svc, "emotional_memory_manager", None)
 
             # [v10+] 从 config.json 读取配置并应用到模块
             self._apply_v10_config()
@@ -458,7 +541,114 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             try:
                 _load_plugins(svc, engine=self)
             except Exception as e:
-                logger.warning("Plugin loading failed: %s", e)
+                logger.warning("Plugin loading failed: %s", e, exc_info=True)
+
+            # [v1.2] 注入自主思考相关引擎：goal_evaluator / action_arbiter / npc_reaction / dormant_wake
+            try:
+                from .goal_evaluator import set_goal_evaluator, GoalEvaluator
+                from .action_arbiter import set_action_arbiter, ActionArbiter
+                from .npc_reaction import set_npc_reaction_engine, NpcReactionEngine
+                from .dormant_wake import set_dormant_wake_evaluator, DormantWakeEvaluator
+                from .perception_scope import (
+                    set_perception_scope, PerceptionScope,
+                )
+
+                # [v1.2] PerceptionScope：视野隔离硬执行器
+                # 绑定 npc_perception 用于 zone 分类
+                perception_scope = PerceptionScope(perception_system=self.npc_perception)
+                set_perception_scope(perception_scope)
+
+                # GoalEvaluator：使用主 LLM + 注入 perception_scope
+                llm_for_eval = self.llm or getattr(svc, 'llm', None)
+                set_goal_evaluator(GoalEvaluator(
+                    llm=llm_for_eval, perception_scope=perception_scope,
+                ))
+
+                # ActionArbiter：注入 EventBus
+                set_action_arbiter(ActionArbiter(event_bus=self.event_bus))
+
+                # NpcReactionEngine：注入 perception + 绑定 EventBus
+                # [v1.6] 同时注入 LLM 启用规则+LLM混合反应
+                reaction_engine = NpcReactionEngine(
+                    perception=self.npc_perception,
+                    llm=self.llm,  # LLMRouter 内部会按 task_type 路由
+                )
+                reaction_engine._all_npcs = self.npc_states
+                reaction_engine._world_state = self.world_state
+                reaction_engine._player = self.player_state
+                reaction_engine.bind_to_event_bus(self.event_bus)
+                set_npc_reaction_engine(reaction_engine)
+
+                # DormantWakeEvaluator：休眠 NPC 唤醒时的 LLM 时间跳跃推演
+                set_dormant_wake_evaluator(DormantWakeEvaluator(llm=llm_for_eval))
+
+                # 把 all_npcs 引用暂存到 world_state，供 goal_evaluator 等模块访问
+                if self.world_state is not None:
+                    self.world_state._all_npcs_ref = self.npc_states
+
+                # [v1.2] 给 BranchPlanner 注入 perception_scope（延迟注入，避免循环依赖）
+                if self.branch_planner is not None:
+                    self.branch_planner.set_perception_scope(perception_scope)
+
+                logger.info("[v1.2] GoalEvaluator/ActionArbiter/NpcReactionEngine/DormantWakeEvaluator/PerceptionScope 已注入")
+            except Exception as e:
+                logger.warning("[v1.2] 注入自主思考引擎失败: %s", e, exc_info=True)
+
+    def _sync_v12_engines(self):
+        """[v1.2] 同步自主思考引擎的运行时引用。
+
+        _init_services 在 init_llm 阶段执行，此时 world_state/npc_states/player_state
+        都还是 None/{}。create_new_game / load_game 完成后需调用此方法，
+        把最新的 world_state / npc_states / player_state 引用同步到
+        NpcReactionEngine 和 PerceptionScope，并把 all_npcs_ref 暂存到 world_state
+        供 GoalEvaluator 等模块访问。
+        """
+        try:
+            from .npc_reaction import get_npc_reaction_engine
+            reaction_engine = get_npc_reaction_engine()
+            reaction_engine._all_npcs = self.npc_states
+            reaction_engine._world_state = self.world_state
+            reaction_engine._player = self.player_state
+            if self.world_state is not None:
+                self.world_state._all_npcs_ref = self.npc_states
+
+            # [v1.2] 同步 PerceptionScope 的运行时引用
+            # event_log_provider 用回调形式，避免循环引用 engine
+            from .perception_scope import get_perception_scope
+            scope = get_perception_scope()
+            scope.set_context(
+                player=self.player_state,
+                all_npcs=self.npc_states,
+                world_state=self.world_state,
+                event_log_provider=lambda: list(getattr(self, "event_log_today", []) or []),
+            )
+
+            # [v1.6] 同步 NpcDialogueManager 的运行时引用
+            # 注入 perception 和 social_network，让对话编排能做视野隔离和关系查询
+            if self.npc_dialogue_manager is not None:
+                self.npc_dialogue_manager.perception = self.npc_perception
+                # social_network 由 turn_processor 管理（延迟初始化）
+                if (self._turn_processor is not None
+                        and hasattr(self._turn_processor, "social_network")):
+                    self.npc_dialogue_manager.social_network = (
+                        self._turn_processor.social_network
+                    )
+                # 也给 reaction_engine 注入 social_network 引用，便于 LLM 反应查好感
+                try:
+                    if (self._turn_processor is not None
+                            and hasattr(self._turn_processor, "social_network")
+                            and self._turn_processor.social_network is not None):
+                        reaction_engine._social_network = (
+                            self._turn_processor.social_network
+                        )
+                except Exception:
+                    pass
+
+            logger.debug("[v1.2] 自主思考引擎引用已同步 (npcs=%d, world=%s)",
+                         len(self.npc_states or {}),
+                         self.current_world_id)
+        except Exception as e:
+            logger.warning("[v1.2] 同步自主思考引擎引用失败: %s", e, exc_info=True)
 
     def _warmup_services(self, world_id: str):
         """[v10.6+] 游戏加载完成后主动预热各子系统，避免第一次玩家输入时才懒加载导致等待。
@@ -478,7 +668,7 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                     self._turn_processor._social_initialized = True
                     warm_steps.append(f"social_network({len(self._turn_processor.social_network.links)} links)")
                 except Exception as e:
-                    logger.warning("Warmup social_network failed: %s", e)
+                    logger.warning("Warmup social_network failed: %s", e, exc_info=True)
 
         # 2. 预热 ContextEngine（构建一次 player_agent 上下文，触发缓存前缀记录）
         if self.player_agent and self.context_engine and self.player_state:
@@ -508,9 +698,9 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                     )
                     warm_steps.append("context_engine(prefix_cached)")
                 except Exception as e:
-                    logger.debug("Warmup context_engine failed: %s", e)
+                    logger.debug("Warmup context_engine failed: %s", e, exc_info=True)
             except Exception as e:
-                logger.warning("Warmup context_engine setup failed: %s", e)
+                logger.warning("Warmup context_engine setup failed: %s", e, exc_info=True)
 
         # 3. 预热 BM25 索引（从记忆库加载一次）
         if self.bm25_retriever and self.hybrid_retriever:
@@ -519,7 +709,7 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                 self.bm25_retriever.search("热身", top_k=1)
                 warm_steps.append("bm25_index")
             except Exception as e:
-                logger.debug("Warmup bm25 failed: %s", e)
+                logger.debug("Warmup bm25 failed: %s", e, exc_info=True)
 
         elapsed = (time.time() - t0) * 1000
         logger.info("Service warmup done in %.0fms: %s", elapsed, ", ".join(warm_steps) if warm_steps else "nothing to warm")
@@ -563,6 +753,27 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         if self.memory_curator:
             self.memory_curator.curate_interval = mc_cfg.get("curate_interval", 15)
 
+        # [v1.3] MemoryBrief 注入 LLM
+        if self.memory_brief and self.llm:
+            self.memory_brief.set_llm(self.llm)
+
+        # [v1.4] 双重缓存治理：把 LLMCache 注入到所有 MimoLLM 实例
+        # 让 MimoLLM 内部 _cache 委托给 LLMCache，避免两套独立缓存不一致
+        if self.llm_cache:
+            for llm_inst in [self.main_llm, self.cheap_llm, self.dialogue_llm]:
+                if llm_inst is not None and hasattr(llm_inst, "set_external_cache"):
+                    try:
+                        llm_inst.set_external_cache(self.llm_cache)
+                    except Exception as e:
+                        logger.warning("Failed to inject external cache to %s: %s",
+                                       getattr(llm_inst, "model_name", "?"), e, exc_info=True)
+            # LLMRouter 内部持有的模型实例也注入
+            if hasattr(self.llm, "set_external_cache"):
+                try:
+                    self.llm.set_external_cache(self.llm_cache)
+                except Exception:
+                    pass
+
         # 蝴蝶效应审批门配置
         ba_cfg = v10_cfg.get("butterfly_approval_gate", {})
         if self.butterfly:
@@ -593,6 +804,9 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         # 将 HybridRetriever 注入 PlayerAgent
         if self.player_agent and self.hybrid_retriever:
             self.player_agent.set_hybrid_retriever(self.hybrid_retriever)
+        # [v1.6 P1-5] 将 CRAG+HyDE 管道注入 PlayerAgent
+        if self.player_agent and self.crag_hyde_pipeline:
+            self.player_agent.set_crag_hyde_pipeline(self.crag_hyde_pipeline)
         # [v10++] 将 MemoryStore 注入 NPC 反思管理器，供检索/存储洞察使用
         if self.npc_reflection:
             self.npc_reflection.set_memory_store(self.memory)
@@ -603,13 +817,46 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         if self.autonomous_memory:
             self.autonomous_memory.set_memory_store(self.memory)
             logger.info("AutonomousMemoryManager wired to MemoryStore")
+        # [v1.6 P1-6] 将 MemoryStore 注入长期记忆摘要器，使摘要写回向量库
+        if self.long_term_memory_summarizer:
+            self.long_term_memory_summarizer.set_memory_store(self.memory)
+            logger.info("LongTermMemorySummarizer wired to MemoryStore")
+            # 将 LongTermMemorySummarizer 注入 MemoryCurator
+            # 使 generate_summary_only 同步生成 L1/L2 摘要写回向量库
+            if self.memory_curator:
+                self.memory_curator.set_long_term_summarizer(self.long_term_memory_summarizer)
+                logger.info("MemoryCurator wired to LongTermMemorySummarizer")
+            # [v1.6 P1-7] 将 LongTermMemorySummarizer 注入 CRAGHyDEPipeline，
+            # 启用里程碑强制召回（叙事含"突破/死亡/结婚"时自动召回 L3 摘要）
+            if self.crag_hyde_pipeline:
+                self.crag_hyde_pipeline.set_long_term_summarizer(self.long_term_memory_summarizer)
+                logger.info("CRAGHyDEPipeline wired to LongTermMemorySummarizer")
+        # [v1.6 P1-8] 将 MemoryStore 注入情感记忆管理器，使情感记忆写回向量库
+        # 并将管理器注入 NPCAgent，使决策时注入情感状态提示
+        if self.emotional_memory_manager:
+            self.emotional_memory_manager.set_memory_store(self.memory)
+            logger.info("EmotionalMemoryManager wired to MemoryStore")
+            if self.npc_agent is not None:
+                self.npc_agent.emotional_memory_manager = self.emotional_memory_manager
+                logger.info("NPCAgent wired to EmotionalMemoryManager")
+            # 将 EmotionalMemoryManager 注入 PlayerAgent，使叙事 prompt 注入主角情感
+            if self.player_agent is not None:
+                self.player_agent.set_emotional_memory_manager(self.emotional_memory_manager)
+                logger.info("PlayerAgent wired to EmotionalMemoryManager")
 
     def _get_fixed_prompt(self) -> str:
         config = self._load_config()
         fp = config.get("fixed_prompt", {})
-        if fp.get("enabled", True):
-            return fp.get("content", "")
-        return ""
+        base = fp.get("content", "") if fp.get("enabled", True) else ""
+        # [v1.6 P1-8] 追加主角情感状态提示（强度低于阈值时为空字符串，不影响原 prompt）
+        if self.emotional_memory_manager is not None:
+            try:
+                hint = self.emotional_memory_manager.get_player_emotion_hint()
+                if hint:
+                    base = (base + "\n" + hint) if base else hint
+            except Exception as e:
+                logger.debug("inject player emotion hint failed: %s", e, exc_info=True)
+        return base
 
     def _get_strip_gray_narrative(self) -> bool:
         config = self._load_config()
@@ -630,15 +877,29 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         config = self._load_config()
         return config.get("game", {}).get("narrative_max_chars", 1000)
 
+    def _get_light_llm_max_context(self) -> int:
+        """[Bug v9.1] 获取轻量 LLM 上下文预算。
+
+        v9 硬编码 2048 token，导致 recent 历史层被压缩到 500 token，
+        上一轮 AI 输出里的时间锚点极易丢失，引发上下文时间线倒退。
+        现从 config.game.light_llm_max_context 读取，默认 8000（兼顾体验与成本）。
+        """
+        config = self._load_config()
+        return config.get("game", {}).get("light_llm_max_context", 8000)
+
     def init_llm(self, api_key: str, base_url: str = None, model_name: str = None,
                  cheap_api_key: str = None, cheap_base_url: str = None, cheap_model_name: str = None,
                  dialogue_api_key: str = None, dialogue_base_url: str = None, dialogue_model_name: str = None):
         config = self._load_config()
-        main_key = api_key
-        main_url = base_url or "https://token-plan-cn.xiaomimimo.com/v1"
-        main_model = model_name or "mimo-V2.5-Pro"
+        # [Bug P3-D-1] 当前端未传 api_key/base_url/model_name 时，回退到 config["llm"]，
+        # 与 cheap_llm/dialogue_llm 保持一致。原实现仅 base_url/model_name 有硬编码默认值，
+        # api_key 留空时直接传给 OpenAI 客户端会抛 Missing credentials，导致 generate-world/create/load 失败。
+        llm_cfg = config.get("llm", {})
+        main_key = api_key or llm_cfg.get("api_key", "")
+        main_url = base_url or llm_cfg.get("base_url", "https://token-plan-cn.xiaomimimo.com/v1")
+        main_model = model_name or llm_cfg.get("model_name", "mimo-V2.5-Pro")
         # [Bug] 从配置读取 max_tokens（0 = 不限制）
-        main_max_tokens = config.get("llm", {}).get("max_tokens", 0)
+        main_max_tokens = llm_cfg.get("max_tokens", 0)
 
         cheap_cfg = config.get("cheap_llm", {})
         c_key = cheap_api_key or cheap_cfg.get("api_key", "")
@@ -651,11 +912,23 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         d_url = dialogue_base_url or dlg_cfg.get("base_url", "")
         d_model = dialogue_model_name or dlg_cfg.get("model_name", "")
 
+        # [v1.7 P2-4] 从 config 注入运行时参数（timeout/retries/max_tokens等）
+        runtime_cfg = None
+        router_cfg = None
+        if hasattr(self, 'config') and self.config:
+            runtime_cfg = getattr(self.config, 'llm_runtime', None)
+            router_cfg = getattr(self.config, 'llm_router', None)
+            if runtime_cfg and hasattr(runtime_cfg, 'model_dump'):
+                runtime_cfg = runtime_cfg.model_dump()
+            if router_cfg and hasattr(router_cfg, 'model_dump'):
+                router_cfg = router_cfg.model_dump()
+
         self.main_llm = MimoLLM(
             api_key=main_key,
             base_url=main_url,
             model_name=main_model,
             default_max_tokens=main_max_tokens,
+            runtime_cfg=runtime_cfg,
         )
 
         if c_key and c_url and c_model:
@@ -664,10 +937,11 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                     api_key=c_key,
                     base_url=c_url,
                     model_name=c_model,
+                    runtime_cfg=runtime_cfg,
                 )
                 logger.info("Cheap/fallback LLM configured: %s @ %s", c_model, c_url)
             except Exception as e:
-                logger.warning("Failed to init cheap LLM: %s", e)
+                logger.warning("Failed to init cheap LLM: %s", e, exc_info=True)
                 self.cheap_llm = None
         else:
             self.cheap_llm = None
@@ -676,9 +950,29 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         self.dialogue_llm = None
         logger.info("Dialogue LLM disabled, all tasks route to main model")
 
-        self.llm = LLMRouter(self.main_llm, self.cheap_llm, self.dialogue_llm)
+        self.llm = LLMRouter(self.main_llm, self.cheap_llm, self.dialogue_llm,
+                             router_cfg=router_cfg)
+        # [I] 从 config.json 加载 LLM 价格表，用于成本估算
+        # 格式: {"llm": {"pricing": {"model_name": {"input_per_1k": 0.03, "output_per_1k": 0.06}}}}
+        try:
+            pricing = config.get("llm", {}).get("pricing", {})
+            if pricing and isinstance(self.llm, LLMRouter):
+                self.llm.configure_pricing(pricing)
+                logger.info("LLM pricing table loaded with %d models", len(pricing))
+        except Exception as e:
+            logger.warning("Failed to load LLM pricing config: %s", e, exc_info=True)
+        # [BudgetGuard] 从 config.json 加载预算控制配置
+        try:
+            budget_cfg = config.get("llm_budget", {})
+            if budget_cfg and isinstance(self.llm, LLMRouter):
+                self.llm.configure_budget(budget_cfg)
+                logger.info("[BudgetGuard] 预算控制已启用: %s", budget_cfg)
+        except Exception as e:
+            logger.warning("Failed to load llm_budget config: %s", e, exc_info=True)
         # [v10.6] 叙事最大字数（从 config 读取，供 turn_processor / player_agent 使用）
         self.narrative_max_chars = self._get_narrative_max_chars()
+        # [Bug v9.1] 轻量 LLM 上下文预算（从 config 读取，供 turn_processor 使用）
+        self.light_llm_max_context = self._get_light_llm_max_context()
         # [v10.5] 初始化文本嵌入函数（SiliconFlow bge-m3）
         self._init_embedding_function(config)
         self._init_services(force=True)
@@ -749,7 +1043,7 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                 emb_cfg.get("base_url", "https://api.siliconflow.cn/v1"),
             )
         except Exception as e:
-            logger.warning("Failed to init embedding function: %s", e)
+            logger.warning("Failed to init embedding function: %s", e, exc_info=True)
 
     def create_new_game(self, world_data: dict, player_data: dict,
                         npc_data_list: list[dict], world_name: str = "新世界") -> str:
@@ -762,6 +1056,14 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             npc_data_list=npc_data_list,
             world_name=world_name,
         )
+        # [v1.3] 切换图片输出到该世界的独立子目录
+        if self.visual_engine:
+            self.visual_engine.set_world_id(self.current_world_id)
+        # [v1.3] 切换 MemoryBrief 到该世界的 briefs/ 目录
+        if self.memory_brief:
+            self.memory_brief.set_world_id(self.current_world_id)
+        # [v1.5 第一期] 初始化该世界的事件总线 + 世界时钟
+        self._init_world_event_bus(self.current_world_id)
 
         loaded = self.save_manager.load_state(self.current_world_id)
         self.meta = loaded["meta"]
@@ -783,16 +1085,21 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             self.npc_registry.register_world_npc(npc_info_with_id)
         logger.info("NpcRegistry initialized with %d world NPCs", len(self.npc_registry.world_npcs))
 
-        # v7: 为没有 MBTI 的 NPC 分配类型
+        # v7: 为没有 MBTI 的 NPC 分配类型，并同步决策风格
+        # [Bug] 原先只对没有 mbti_type 的 NPC 调用 assign_mbti()，
+        #       但 assign_mbti() 内部已修复为同步更新 decision_style，
+        #       所以需要对所有 NPC 都调用（有 mbti_type 的也会修正 decision_style）。
         if self.npc_agent:
             for npc in self.npc_states.values():
-                if not npc.mbti_type:
-                    self.npc_agent.assign_mbti(npc)
+                self.npc_agent.assign_mbti(npc)
 
         self.memory = self.save_manager.get_memory(self.current_world_id)
         self.lorebook = Lorebook()
         if self.world_state:
             self.lorebook.init_default_entries(self.world_state.world_type, self.npc_states)
+            # [L] 同步 SceneDetector 的世界类型，让场景检测关键词适配当前世界
+            if self.scene_detector:
+                self.scene_detector.set_world_type(self.world_state.world_type)
         self.player_agent = PlayerAgent(self._bound_llm(TASK_DIALOGUE), self.memory, self.lorebook)
         # [v10++] 注入上下文引擎（若服务已初始化）
         if self.context_engine:
@@ -843,6 +1150,9 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         # [v11] 同步 NPC 关系到 player_state.relations（确保 NPC 好感度能正确显示）
         self._sync_npc_relations_to_player()
 
+        # [v1.2] 同步自主思考引擎的运行时引用（world_state/npc_states/player）
+        self._sync_v12_engines()
+
         return self.current_world_id
 
     def load_game(self, world_id: str) -> dict:
@@ -850,6 +1160,18 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             raise RuntimeError("请先调用 init_llm() 初始化LLM")
 
         self.current_world_id = world_id
+        # [v1.3] 切换图片输出到该世界的独立子目录，加载存档后新图片不会混淆
+        if self.visual_engine:
+            self.visual_engine.set_world_id(world_id)
+        # [v1.3] 切换 MemoryBrief 到该世界的 briefs/ 目录
+        if self.memory_brief:
+            self.memory_brief.set_world_id(world_id)
+        # [v1.5 第一期] 初始化该世界的事件总线 + 世界时钟，并从磁盘加载历史事件
+        self._init_world_event_bus(world_id)
+        if self.player_event_bus:
+            self.player_event_bus.load_from_disk()
+        if self.world_event_bus:
+            self.world_event_bus.load_from_disk()
 
         # 优先加载最新slot，没有则加载基础存档
         timeline = self.save_manager.get_timeline(world_id)
@@ -927,6 +1249,9 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         # [v11] 同步 NPC 关系到 player_state.relations
         self._sync_npc_relations_to_player()
 
+        # [v1.2] 同步自主思考引擎的运行时引用（world_state/npc_states/player）
+        self._sync_v12_engines()
+
         self.event_log_today = []
         self.action_log_today = []
         self.player_impacts_today = []
@@ -970,14 +1295,24 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         [v9] 处理玩家输入 — 委托给 TurnProcessorV2。
         保留原方法签名以保持向后兼容。
         注意：并发安全由调用方（game_routes.py）通过 _game_lock 保证。
+        [v1.7 P2-2] 关键路径保护：TurnProcessor 异常时降级返回，不让玩家卡死。
         """
         if not self._turn_processor:
             raise RuntimeError("TurnProcessorV2 未初始化，请先调用 init_llm()")
 
-        result = self._turn_processor.process(player_input)
-        # [v10.5] TurnResult 结构化输出契约 → 转 dict 以保持后续代码向后兼容
-        from .turn_result import TurnResult
-        result = result.to_dict() if isinstance(result, TurnResult) else result
+        try:
+            result = self._turn_processor.process(player_input)
+            # [v10.5] TurnResult 结构化输出契约 → 转 dict 以保持后续代码向后兼容
+            from .turn_result import TurnResult
+            result = result.to_dict() if isinstance(result, TurnResult) else result
+        except Exception as e:
+            logger.error("TurnProcessor failed, returning degraded result: %s", e, exc_info=True)
+            result = {
+                "narrative": "（时空出现波动，你的行动未能产生预期效果，请重试。）",
+                "options": ["重新尝试"],
+                "degraded": True,
+                "error": str(e)[:200],
+            }
         # 补充 auto_event（TurnProcessor 不处理 _maybe_trigger_world_event）
         auto_event = self._maybe_trigger_world_event()
         if auto_event:
@@ -997,94 +1332,199 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                      world_state=self.world_state,
                      player_state=self.player_state)
 
-        # [v10.1] 长时记忆滚动摘要：每10回合自动压缩历史
+        # [v10.1] 长时记忆滚动摘要：每10回合自动生成历史摘要
+        # [v1.3] 改用 generate_summary_only：仅生成摘要存入 _history_summaries 供 LLM 上下文使用，
+        #        不再修改 narrative_history，确保加载存档后聊天界面能完整呈现所有历史叙事（如看小说）
+        # [v1.7 P2-3] 后台化：后处理四件套不阻塞玩家响应，关键回合节省 5-15s
+        # [P4-A-1] 4 个后处理任务彼此独立（都只读 narrative），改为 asyncio.gather 并行执行
+        _post_tasks: list = []  # 收集本次回合需要执行的后处理同步函数
         if self.memory_curator and self.meta:
             current_turn = self.meta.current_turn
             current_day = self.world_state.current_day if self.world_state else 0
             if self.memory_curator.should_summarize(current_turn):
-                try:
-                    summary_result = self.memory_curator.summarize_history(
-                        self.narrative_history, current_turn, current_day
-                    )
-                    if summary_result.get("status") == "success":
-                        self.narrative_history = summary_result["replacement"] + summary_result["remaining"]
-                        logger.info("History summarized: %d entries compressed, %d total remaining",
-                                    summary_result["summarized_count"], len(self.narrative_history))
-                        result["summary_generated"] = True
-                        result["summary_text"] = summary_result.get("summary", {}).get("text", "")
-                        # 摘要成功后全量重写 JSONL，避免磁盘增量与内存压缩不一致
-                        try:
-                            narrative_file = self.save_manager.base_dir / self.current_world_id / "state" / "narrative_history.jsonl"
-                            narrative_file.parent.mkdir(parents=True, exist_ok=True)
-                            with open(narrative_file, "w", encoding="utf-8") as f:
-                                for entry in self.narrative_history:
-                                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-                            self._persisted_narrative_count = len(self.narrative_history)
-                            self._narrative_compressed = True
-                        except Exception as rewrite_err:
-                            logger.warning("Narrative JSONL full rewrite failed: %s", rewrite_err)
-                except Exception as e:
-                    logger.warning("History summary failed: %s", e, exc_info=True)
+                def _gen_history_summary():
+                    try:
+                        with TimingCollectorInstance.scope("memory", "generate_summary_only"):
+                            summary_result = self.memory_curator.generate_summary_only(
+                                self.narrative_history, current_turn, current_day
+                            )
+                            if summary_result.get("status") == "success":
+                                logger.info("History summary-only #%d created (original preserved, total=%d)",
+                                            self.memory_curator._summary_counter, len(self.narrative_history))
+                    except Exception as e:
+                        logger.warning("History summary failed: %s", e, exc_info=True)
+                _post_tasks.append(_gen_history_summary)
 
         # [v10.1] 人物卡闭环：更新NPC对玩家的印象
         if result.get("narrative") and self.npc_states:
-            try:
-                self._update_npc_impressions(player_input, result.get("narrative", ""))
-            except Exception as e:
-                logger.warning("NPC impression update failed: %s", e, exc_info=True)
+            narrative_for_impressions = result.get("narrative", "")
+            def _update_impressions():
+                try:
+                    with TimingCollectorInstance.scope("memory", "update_npc_impressions"):
+                        self._update_npc_impressions(player_input, narrative_for_impressions)
+                except Exception as e:
+                    logger.warning("NPC impression update failed: %s", e, exc_info=True)
+            _post_tasks.append(_update_impressions)
+
+        # [v1.6 P1-6] L3 里程碑摘要：检测叙事中是否包含重大事件，触发即生成永久记忆
+        if result.get("narrative") and self.long_term_memory_summarizer:
+            current_day = self.world_state.current_day if self.world_state else 0
+            current_turn = self.meta.current_turn if self.meta else 0
+            narrative_for_milestone = result.get("narrative", "")
+            def _check_milestone():
+                try:
+                    with TimingCollectorInstance.scope("memory", "check_milestone"):
+                        milestone_result = self.long_term_memory_summarizer.check_and_generate_milestone(
+                            narrative=narrative_for_milestone,
+                            day=current_day,
+                            context=player_input or "",
+                            turn=current_turn,
+                        )
+                        if milestone_result and milestone_result.get("status") == "success":
+                            logger.info("L3 milestone summary created: %s on day %d",
+                                        milestone_result.get("milestone_type", ""), current_day)
+                except Exception as e:
+                    logger.warning("L3 milestone detection failed: %s", e, exc_info=True)
+            _post_tasks.append(_check_milestone)
+
+        # [v1.6 P1-8] 情感记忆评估：对叙事文本进行情感评估并写入向量库，
+        # 同时更新相关 NPC 与主角的情感状态向量。回合末统一衰减。
+        if result.get("narrative") and self.emotional_memory_manager:
+            current_turn = self.meta.current_turn if self.meta else 0
+            narrative_text = result.get("narrative", "")
+            # 玩家输入也参与评估（玩家主动行为可能含情感倾向）
+            full_text = (player_input + "\n" + narrative_text) if player_input else narrative_text
+            # [Bug] 原先将所有活跃NPC的ID都传给record_event，而record_event对整段
+            #       文本只做一次情感评估，然后把同一个结果应用到所有NPC上，
+            #       导致所有NPC的情感状态完全相同（如全部"恐惧38%"）。
+            #       修复：只将叙事文本中实际提到名字的NPC加入情感更新列表，
+            #       未被提及的NPC保持各自独立的情感状态。
+            npc_ids: list[str] = []
+            npc_names: list[str] = []
+            if self.npc_states:
+                for nid, npc in self.npc_states.items():
+                    # 仅对在场、非休眠的活跃 NPC 应用情感更新
+                    if getattr(npc, 'is_dormant', False):
+                        continue
+                    # 只对叙事文本中实际提到名字的NPC更新情感
+                    if npc.name and npc.name in full_text:
+                        npc_ids.append(nid)
+                        npc_names.append(npc.name)
+            detail_str = (player_input or "")[:100]
+            def _record_emotional():
+                try:
+                    with TimingCollectorInstance.scope("memory", "emotional_record"):
+                        eval_result = self.emotional_memory_manager.record_event(
+                            text=full_text,
+                            npc_ids=npc_ids,
+                            npc_names=npc_names,
+                            turn=current_turn,
+                            source="narrative",
+                            detail=detail_str,
+                        )
+                        if eval_result and eval_result.get("emotion_type") != "neutral":
+                            logger.debug("Emotional eval: %s (%.2f)",
+                                         eval_result.get("emotion_type"),
+                                         eval_result.get("emotional_weight", 0))
+                        # 回合末衰减所有 NPC 情感状态
+                        self.emotional_memory_manager.decay_all(current_turn)
+                except Exception as e:
+                    logger.warning("Emotional memory evaluation failed: %s", e, exc_info=True)
+            _post_tasks.append(_record_emotional)
+
+        # [P4-A-1] 投递一个 async wrapper，内部用 asyncio.gather 并行执行所有后处理任务
+        # 4 个任务彼此独立（都只读 narrative），原串行排队改为并行，关键回合节省 5-15s
+        if _post_tasks:
+            async def _run_post_parallel():
+                import asyncio as _aio
+                # 用 to_thread 把同步函数包装为协程，gather 并行执行
+                # return_exceptions=True 保证一个失败不影响其他
+                await _aio.gather(
+                    *(_aio.to_thread(f) for f in _post_tasks),
+                    return_exceptions=True
+                )
+            self._bg(_run_post_parallel)
 
         return result
 
-    def undo_last_turn(self) -> dict:
-        """[v11] 撤销最后一次玩家行动及AI回复，从后端状态中彻底移除。"""
+    def undo_last_turn(self, steps: int = 1) -> dict:
+        """[v11] 撤销最后一次玩家行动及AI回复，从后端状态中彻底移除。
+
+        [v11.1] 增加 steps 参数支持多步连续撤销：
+        - steps=1（默认）：撤销最近一次行动（兼容原行为）
+        - steps=N：连续撤销 N 次玩家行动（含每次的 AI 回复和关联事件）
+        - steps=0 或负数：不撤销
+        撤销会在 narrative_history 为空时提前停止，不会报错。
+        """
+        if steps <= 0:
+            return {"success": True, "removed": 0, "remaining": len(self.narrative_history), "undone_turns": 0}
         if not self.narrative_history:
             return {"success": False, "error": "没有可撤销的历史记录"}
 
-        removed_count = 0
-        # 从 narrative_history 末尾移除：先移除可能的 event 条目，再移除 narrative 条目
-        # 注意：一次回合可能产生 1-2 条记录（narrative + 可选的 event）
-        while self.narrative_history:
-            last = self.narrative_history[-1]
-            # 移除最后一条 narrative（含 player_input）及其关联的 event
-            if last.get("type") == "narrative":
-                self.narrative_history.pop()
-                removed_count += 1
-                break
-            elif last.get("type") == "event":
-                # 检查是否为回合产生的世界事件（非自动事件）
-                # 自动事件通常没有 player_input 关联
-                self.narrative_history.pop()
-                removed_count += 1
-                # 继续循环，移除关联的 narrative 条目
-                continue
-            else:
-                break
+        total_removed = 0
+        undone_turns = 0
 
-        # 撤销蝴蝶效应记录
-        if self.butterfly and self.butterfly.player_actions_history:
-            self.butterfly.player_actions_history.pop()
-            # 同步移除审批历史中对应回合的记录
-            if self.butterfly.pending_approvals:
-                self.butterfly.pending_approvals.pop()
+        # 循环撤销 steps 步（每步 = 一个 narrative + 其前置关联 event）
+        for step in range(steps):
+            if not self.narrative_history:
+                break  # 历史已空，提前停止
 
-        # 回合数回退
-        if self.meta and self.meta.current_turn > 0:
-            self.meta.current_turn -= 1
+            step_removed = 0
+            # 从 narrative_history 末尾移除：先移除可能的 event 条目，再移除 narrative 条目
+            # 注意：一次回合可能产生 1-2 条记录（narrative + 可选的 event）
+            while self.narrative_history:
+                last = self.narrative_history[-1]
+                # 移除最后一条 narrative（含 player_input）及其关联的 event
+                if last.get("type") == "narrative":
+                    self.narrative_history.pop()
+                    step_removed += 1
+                    break
+                elif last.get("type") == "event":
+                    # 检查是否为回合产生的世界事件（非自动事件）
+                    # 自动事件通常没有 player_input 关联
+                    self.narrative_history.pop()
+                    step_removed += 1
+                    # 继续循环，移除关联的 narrative 条目
+                    continue
+                else:
+                    break
+
+            if step_removed == 0:
+                break  # 本步没移除任何条目，说明历史结构异常，停止
+
+            total_removed += step_removed
+            undone_turns += 1
+
+            # 撤销蝴蝶效应记录
+            if self.butterfly and self.butterfly.player_actions_history:
+                self.butterfly.player_actions_history.pop()
+                # 同步移除审批历史中对应回合的记录
+                if self.butterfly.pending_approvals:
+                    self.butterfly.pending_approvals.pop()
+
+            # 回合数回退
+            if self.meta and self.meta.current_turn > 0:
+                self.meta.current_turn -= 1
+
+        if total_removed == 0:
+            return {"success": False, "error": "没有可撤销的历史记录"}
 
         # 标记需要全量重写 JSONL，确保磁盘上的记录也被移除
         self._narrative_compressed = True
         self._persisted_narrative_count = len(self.narrative_history)
 
         # 持久化到磁盘
+        # [Bug] 原先调用 self.save_state()，但 GameEngine 无此方法（SaveMixin 提供 save_game），
+        # 导致撤销后存档始终抛 AttributeError 被吞掉，撤销结果无法持久化。改为 save_game()。
         try:
-            self.save_state()
-            logger.info("Undo: removed %d entries from narrative_history, %d remaining",
-                        removed_count, len(self.narrative_history))
+            self.save_game()
+            logger.info("Undo: removed %d entries (%d turns) from narrative_history, %d remaining",
+                        total_removed, undone_turns, len(self.narrative_history))
         except Exception as e:
-            logger.error("Undo save failed: %s", e)
+            logger.error("Undo save failed: %s", e, exc_info=True)
             return {"success": False, "error": f"撤销后保存失败: {e}"}
 
-        return {"success": True, "removed": removed_count, "remaining": len(self.narrative_history)}
+        return {"success": True, "removed": total_removed, "remaining": len(self.narrative_history), "undone_turns": undone_turns}
 
     def _classify_action_type(self, player_input: str, narrative: str) -> str:
         text = (player_input + " " + narrative).lower()
@@ -1104,366 +1544,48 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             return "rest"
         return "other"
 
-    def npc_chat(self, npc_id: str, player_message: str, chat_history: list = None, stream_callback=None) -> dict:
-        """
-        NPC 聊天接口：让玩家以"上帝视角"与任意 NPC 对话。
-        不影响游戏回合、状态或剧情，仅会话内保存聊天记录。
-
-        参数：
-            npc_id: NPC 的 agent_id
-            player_message: 玩家的消息
-            chat_history: 之前的聊天历史，格式为 [{"role": "user/assistant", "content": "..."}]
-            stream_callback: 可选，流式回调函数，每收到一个 token 就调用一次
-
-        返回：
-            {"success": bool, "message": str, "error": str}
-        """
-        if not self.llm:
-            return {"success": False, "message": "", "error": "LLM 未初始化"}
-
-        chat_history = chat_history or []
-
-        if npc_id == "player":
-            npc_name = self.player_state.name if self.player_state else "主角"
-            npc_personality = ""
-            npc_role = ""
-            npc_background = ""
-            npc_recent_actions = []
-            npc_relation = "玩家自己"
-            npc_location = resolve_location_name(self.player_state.location, self.world_state) if self.player_state else ""
-        else:
-            npc_state = self.npc_states.get(npc_id) if self.npc_states else None
-            if not npc_state:
-                return {"success": False, "message": "", "error": f"NPC 不存在: {npc_id}"}
-
-            npc_name = npc_state.name
-            npc_personality = npc_state.personality
-            npc_role = npc_state.role
-            npc_background = "\n".join([rh.get("description", "") for rh in npc_state.role_history[:3]])
-            npc_recent_actions = npc_state.recent_actions[-3:]
-            npc_relation = npc_state.relation_to_player.description if npc_state.relation_to_player else "陌生人"
-            npc_location = resolve_location_name(npc_state.current_location, self.world_state)
-
-        world_name = self.world_def.get("world_name", "") if self.world_def else ""
-        world_type = self.world_state.world_type if self.world_state else "custom"
-
-        recent_actions_str = ""
-        if npc_recent_actions:
-            recent_actions_str = "\n".join([f"- {a.get('action', '')}" for a in npc_recent_actions])
-
-        system_prompt = f"""
-你是角色扮演游戏中的 NPC「{npc_name}」。请以这个角色的身份与玩家对话。
-
-【世界信息】
-世界名称：{world_name}
-世界类型：{world_type}
-
-【你的身份】
-姓名：{npc_name}
-身份：{npc_role}
-性格：{npc_personality if npc_personality else "温和友善"}
-与玩家关系：{npc_relation}
-当前位置：{npc_location}
-
-【你的经历】
-{npc_background if npc_background else "暂无特殊经历"}
-
-【最近行动】
-{recent_actions_str if recent_actions_str else "暂无记录"}
-
-【核心规则】
-1. 你只知道自己的经历和世界设定，不知道其他 NPC 的秘密
-2. 你不能回答超出你角色知识范围的问题
-3. 如果玩家问你不知道的事情，如实回答"我不知道"或"这我不清楚"
-4. 不要打破第四面墙，不要提及你是 AI
-5. 你的回答要符合你的性格设定
-6. 回答要自然、简短，像日常对话一样，不要长篇大论
-7. 如果玩家是在与主角聊天（npc_id=player），你就是主角本人，用第一人称回答
-
-【示例】
-玩家：你最近在忙什么？
-你：最近一直在修炼剑法，希望能早日突破瓶颈。
-"""
-
-        messages = [{"role": "system", "content": system_prompt}]
-        for msg in chat_history[-10:]:
-            messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
-        messages.append({"role": "user", "content": player_message})
-
+    def _maybe_generate_private_facts(self, npc_state):
+        """[v1.3] 普通 NPC 私密档案懒加载生成。
+        检查 config 开关，仅在启用时为该 NPC 生成 3-5 条私密事实。
+        失败时不影响主流程。"""
         try:
-            if stream_callback and hasattr(self.llm, "chat_stream"):
-                prompt_parts = []
-                for m in messages:
-                    role_name = m["role"]
-                    if role_name == "system":
-                        role_name = "系统"
-                    elif role_name == "user":
-                        role_name = "玩家"
-                    elif role_name == "assistant":
-                        role_name = npc_name
-                    prompt_parts.append(f"【{role_name}】\n{m['content']}")
-                full_prompt = "\n\n".join(prompt_parts) + f"\n\n【{npc_name}】\n"
-                
-                full_message = ""
-                token_gen = self.llm.chat_stream(full_prompt, temperature=0.7, max_tokens=500)
-                for token in token_gen:
-                    if token:
-                        full_message += token
-                        try:
-                            stream_callback(token)
-                        except Exception:
-                            pass
-                return {"success": True, "message": full_message, "error": ""}
-            else:
-                prompt_parts = []
-                for m in messages:
-                    role_name = m["role"]
-                    if role_name == "system":
-                        role_name = "系统"
-                    elif role_name == "user":
-                        role_name = "玩家"
-                    elif role_name == "assistant":
-                        role_name = npc_name
-                    prompt_parts.append(f"【{role_name}】\n{m['content']}")
-                full_prompt = "\n\n".join(prompt_parts) + f"\n\n【{npc_name}】\n"
-                result = self.llm.chat(full_prompt, temperature=0.7, max_tokens=500)
-                return {"success": True, "message": result or "", "error": ""}
+            if not npc_state or not self.llm:
+                return
+            _cfg = self._load_config() if hasattr(self, '_load_config') else {}
+            from modules.npc_private_facts import (
+                generate_private_facts, is_feature_enabled, get_max_facts
+            )
+            # 普通模式必须开启开关；小说模式由 world_manager 处理
+            if not is_feature_enabled(_cfg):
+                return
+
+            current_day = self.world_state.current_day if self.world_state else 1
+            world_context = ""
+            if self.world_state:
+                world_context = f"世界：{self.world_state.world_name or ''}\n"
+                if self.world_state.description:
+                    world_context += f"背景：{self.world_state.description[:300]}"
+
+            max_facts = get_max_facts(_cfg)
+            generate_private_facts(
+                npc_state, self.llm,
+                world_context=world_context,
+                novel_source="",
+                max_facts=max_facts,
+            )
+            # 覆写 created_day
+            for f in (npc_state.private_facts or []):
+                f["created_day"] = current_day
         except Exception as e:
-            logger.error("NPC chat failed: %s", e)
-            return {"success": False, "message": "", "error": str(e)}
+            logger.warning(
+                "[PrivateFacts] 懒加载生成失败 (%s): %s",
+                getattr(npc_state, 'name', '?'), e
+            )
 
-    def _update_npc_impressions(self, player_input: str, narrative: str):
-        """
-        [v10.1] 人物卡闭环：更新NPC对玩家的印象
-        - 简单规则更新信任度和互动计数
-        - 每3次互动调用LLM更新印象总结
-        """
-        # TODO: 当前 trust_delta 基于全局文本关键词计算，对所有被提及 NPC 应用相同变更，
-        # 未做到 NPC 特异（即同一行为对不同 NPC 应有不同信任度影响）。
-        # 完整修复需要结合上下文与 NPC 性格做差异化计算，暂保留以避免崩溃。
-        current_day = self.world_state.current_day if self.world_state else 0
-        npcs_to_update = []
-        text = player_input + " " + narrative
-
-        for npc_id, npc in self.npc_states.items():
-            if npc.name and len(npc.name) >= 2 and npc.name in text:
-                imp = npc.impression_of_player
-                imp["interaction_count"] = imp.get("interaction_count", 0) + 1
-                imp["last_updated_day"] = current_day
-
-                trust_delta = 0
-                positive_kws = ["感谢", "感激", "帮忙", "救", "赠", "送", "友好", "微笑", "点头", "称赞", "欣赏", "信任"]
-                negative_kws = ["骗", "偷", "抢", "杀", "打", "骂", "威胁", "恐吓", "愤怒", "厌恶", "憎恨", "背叛"]
-                dialog_kws = ["说", "道", "问", "答", "交谈", "聊", "谈话"]
-
-                for kw in positive_kws:
-                    if kw in text:
-                        trust_delta += 3
-                for kw in negative_kws:
-                    if kw in text:
-                        trust_delta -= 5
-                for kw in dialog_kws:
-                    if kw in text:
-                        trust_delta += 1
-
-                current_trust = imp.get("trust_level", 50)
-                imp["trust_level"] = max(0, min(100, current_trust + trust_delta))
-
-                interaction_record = {
-                    "day": current_day,
-                    "player_action": player_input[:100],
-                    "summary": narrative[:200] if narrative else "",
-                    "trust_delta": trust_delta,
-                }
-
-                memorable = imp.get("memorable_interactions", [])
-                memorable.append(interaction_record)
-                if len(memorable) > 5:
-                    memorable[:] = memorable[-5:]
-
-                imp["memorable_interactions"] = memorable
-
-                if imp["interaction_count"] % 3 == 0 and self.llm:
-                    npcs_to_update.append(npc)
-
-        if npcs_to_update and self.llm:
-            try:
-                self._update_npc_impressions_with_llm(npcs_to_update, player_input, narrative, current_day)
-            except Exception as e:
-                logger.debug("LLM impression update skipped: %s", e)
-
-    def _update_npc_impressions_with_llm(self, npcs, player_input: str, narrative: str, day: int):
-        """使用LLM深度更新NPC对玩家的印象总结"""
-        for npc in npcs[:2]:
-            imp = npc.impression_of_player
-            recent_interactions = "\n".join([
-                f"- 第{m['day']}天：{m.get('summary', '')[:150]}"
-                for m in imp.get("memorable_interactions", [])[-3:]
-            ])
-
-            prompt = f"""你是NPC「{npc.name}」，现在根据近期互动更新你对玩家的印象。
-
-【你的身份】
-名字：{npc.name}
-性格：{npc.personality or '普通人'}
-身份：{npc.role or '普通NPC'}
-当前对玩家信任度：{imp.get('trust_level', 50)}/100
-之前对玩家的印象：{imp.get('summary', '还不太了解这个人')}
-
-【近期互动】
-{recent_interactions or '第一次互动'}
-
-【本次互动】
-玩家行为：{player_input[:200]}
-结果：{narrative[:300]}
-
-【任务】
-更新你对玩家的印象。只输出JSON，格式：
-{{
-  "summary": "一段50-100字的总体印象描述，从{npc.name}的视角出发",
-  "known_traits": ["观察到的玩家特质1", "特质2", "特质3"],
-  "trust_change": 0到10或-10到0的信任度变化
-}}
-
-只输出JSON。"""
-
-            try:
-                result = self.llm.chat_json(prompt, temperature=0.5, max_tokens=0)
-                if result.get("summary"):
-                    imp["summary"] = result["summary"]
-                if result.get("known_traits"):
-                    existing = set(imp.get("known_traits", []))
-                    for t in result["known_traits"]:
-                        if t and t not in existing:
-                            existing.add(t)
-                    imp["known_traits"] = list(existing)[:8]
-                if result.get("trust_change"):
-                    imp["trust_level"] = max(0, min(100, imp.get("trust_level", 50) + int(result["trust_change"])))
-                logger.debug("Updated impression for NPC %s: trust=%d", npc.name, imp["trust_level"])
-            except Exception as e:
-                logger.debug("LLM impression update failed for %s: %s", npc.name, e)
-
-    def _sync_npc_relations_to_player(self):
-        """[v11] 将 NPC 的 relation_to_player 同步到 player_state.relations。
-        确保侧边栏关系面板能正确显示好感度（默认50），而非0。"""
-        if not self.player_state or not self.npc_states:
-            return
-        for npc_id, npc in self.npc_states.items():
-            npc_name = npc.name
-            if not npc_name:
-                continue
-            existing = self.player_state.relations.get(npc_name)
-            if existing:
-                # 已有记录：同步 NPC 端的好感度（NPC 端可能有更新）
-                npc_favor = 50
-                npc_rel_type = "陌生人"
-                if hasattr(npc, 'relation_to_player'):
-                    rtp = npc.relation_to_player
-                    if isinstance(rtp, dict):
-                        npc_favor = rtp.get("favor", 50)
-                        npc_rel_type = rtp.get("relation_type", "陌生人")
-                    elif hasattr(rtp, 'favor'):
-                        npc_favor = rtp.favor
-                        npc_rel_type = getattr(rtp, 'relation_type', '陌生人')
-                # 如果 player 侧好感到0但NPC侧不是0，以NPC侧为准
-                if existing.favor == 0 and npc_favor > 0:
-                    existing.favor = npc_favor
-                    existing.relation_type = npc_rel_type
-                    logger.info("Synced relation %s: favor 0 → %d", npc_name, npc_favor)
-            else:
-                # 没有记录：从 NPC 侧初始化
-                npc_favor = 50
-                npc_rel_type = "陌生人"
-                if hasattr(npc, 'relation_to_player'):
-                    rtp = npc.relation_to_player
-                    if isinstance(rtp, dict):
-                        npc_favor = rtp.get("favor", 50)
-                        npc_rel_type = rtp.get("relation_type", "陌生人")
-                    elif hasattr(rtp, 'favor'):
-                        npc_favor = rtp.favor
-                        npc_rel_type = getattr(rtp, 'relation_type', '陌生人')
-                from .schemas import RelationEntry
-                self.player_state.relations[npc_name] = RelationEntry(
-                    favor=npc_favor, relation_type=npc_rel_type
-                )
-                logger.info("Initialized relation %s: favor=%d, type=%s", npc_name, npc_favor, npc_rel_type)
-        # [Bug] 将 npc_states 的关系同步到 npc_registry.world_npcs，
-        # 否则 who-is-who 面板始终显示 world_def 里的初始关系（陌生人）
-        if self.npc_registry:
-            for npc_id, npc in self.npc_states.items():
-                if npc_id in self.npc_registry.world_npcs:
-                    rtp = npc.relation_to_player
-                    if hasattr(rtp, 'favor'):
-                        self.npc_registry.world_npcs[npc_id].relation_to_player = {
-                            "favor": rtp.favor, "relation_type": getattr(rtp, 'relation_type', '陌生人')
-                        }
-
-    def _extract_relations_from_narrative(self, narrative: str, world_data: dict):
-        if not self.llm or not self.npc_states or not self.player_state:
-            return
-        npc_list = ", ".join([f"{npc.name}({npc_id})" for npc_id, npc in self.npc_states.items()])
-        existing_info = ""
-        for nid, npc in self.npc_states.items():
-            rel = self.player_state.relations.get(npc.name)
-            if rel:
-                existing_info += f"- {npc.name}: 好感{rel.favor}, 关系={rel.relation_type}\n"
-        prompt = f"""根据以下叙事文本，分析NPC与主角的关系变化。
-
-【叙事文本】
-{narrative[:800]}
-
-【NPC列表】
-{npc_list}
-
-【当前已知关系】
-{existing_info or "无"}
-
-【分析规则】
-- 如果叙事中NPC的行为或态度发生重大变化（如从友善变敌对、从陌生变亲密），必须更新relation_type
-- 如果只是日常互动没有实质变化，只更新favor微调，不改relation_type
-- relation_type必须准确反映当前关系：爱人、侍女、下属、敌人、师徒、挚友、陌生人等
-- 输出的npc_id必须是NPC的名字（与NPC列表中的名字一致），不能用编号
-
-【输出JSON格式】
-{{"relations": {{"NPC名字": {{"relation_type": "关系类型", "favor": 好感度0-100, "changed": true/false}}}}}}
-
-只输出JSON。"""
-        try:
-            result = self.llm.chat_json(prompt, temperature=0.3)
-            if "relations" in result:
-                # [v10.5] 兼容 LLM 返回 list 格式
-                rel_data_raw = result["relations"]
-                if isinstance(rel_data_raw, list):
-                    rel_data_raw = {r.get("npc_id", r.get("name", "")): r for r in rel_data_raw if isinstance(r, dict)}
-                if not isinstance(rel_data_raw, dict):
-                    rel_data_raw = {}
-                for npc_id, rel_data in rel_data_raw.items():
-                    matched_id = npc_id
-                    if npc_id not in self.npc_states:
-                        for nid in self.npc_states:
-                            if npc_id in nid or nid in npc_id:
-                                matched_id = nid
-                                break
-                    if matched_id in self.npc_states:
-                        npc_name = self.npc_states[matched_id].name
-                        rt = rel_data.get("relation_type", "陌生人")
-                        fv = rel_data.get("favor", 50)
-                        changed = rel_data.get("changed", False)
-                        existing_rel = self.player_state.relations.get(npc_name)
-                        is_stranger = existing_rel and existing_rel.relation_type == "陌生人"
-                        if changed or is_stranger or not existing_rel:
-                            self.player_state.relations[npc_name] = RelationEntry(
-                                favor=fv, relation_type=rt
-                            )
-                            self.npc_states[matched_id].relation_to_player = RelationEntry(
-                                favor=fv, relation_type=rt
-                            )
-                        elif existing_rel:
-                            delta = fv - existing_rel.favor
-                            if abs(delta) >= 10:
-                                existing_rel.favor = max(0, min(100, fv))
-        except Exception as e:
-            logger.warning("Failed to extract relations from narrative: %s", e)
+    # [v1.4 P1-5] 以下 NPC 方法已迁移到 NpcFacadeMixin：
+    #   npc_chat / _update_npc_impressions / _update_npc_impressions_with_llm /
+    #   _sync_npc_relations_to_player / _extract_relations_from_narrative
+    # （保留 _maybe_generate_private_facts 在主类，因 NpcFacadeMixin 依赖它）
 
     def _maybe_trigger_world_event(self) -> dict | None:
         if not self.world_agent or not self.world_state or not self.player_state:
@@ -1603,30 +1725,26 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             raise RuntimeError("WorldManager 未初始化，请先调用 init_llm()")
         return self._world_manager.advance_time(time_slot)
 
+    @property
+    def auto_run_engine(self):
+        """[v1.2] 自主运行引擎（懒加载）"""
+        if self._auto_run_engine is None:
+            from .auto_run import AutoRunEngine
+            self._auto_run_engine = AutoRunEngine(self)
+        return self._auto_run_engine
+
+    def auto_run_days(self, days: int, options: dict = None) -> dict:
+        """[v1.2] 让世界自主运行 N 天，围绕主角汇总成小说章节。
+        详见 AutoRunEngine.run_days。"""
+        return self.auto_run_engine.run_days(days, options)
+
     def _on_new_day(self):
         """[v9] 新一天处理 — 委托给 WorldManager"""
         if not self._world_manager:
             raise RuntimeError("WorldManager 未初始化，请先调用 init_llm()")
         self._world_manager.on_new_day()
 
-    def trigger_npc_reflection(self) -> dict:
-        """[v10++] 触发 NPC 批量反思（Generative Agents 式）。
-        在每日例程或时间推进时调用，由 NPCReflection 内部节流（每 N 天一次）。
-        失败时不影响主流程。"""
-        if not self.npc_reflection or not self.npc_states:
-            return {}
-        if not self.meta or not self.world_state:
-            return {}
-        try:
-            return self.npc_reflection.batch_reflect(
-                npc_states=self.npc_states,
-                current_turn=self.meta.current_turn,
-                current_day=self.world_state.current_day,
-                max_npcs=10,
-            )
-        except Exception as e:
-            logger.warning("NPC 反思触发失败: %s", e)
-            return {}
+    # [v1.4 P1-5] trigger_npc_reflection 已迁移到 NpcFacadeMixin
 
     def trigger_autonomous_memory(self) -> dict:
         """[v10++] 触发 Agent 自主记忆管理（MemGPT/Letta 式）。
@@ -1656,7 +1774,7 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                 }
             return {}
         except Exception as e:
-            logger.warning("自主记忆管理触发失败: %s", e)
+            logger.warning("自主记忆管理触发失败: %s", e, exc_info=True)
             return {}
 
     def _estimate_context_pressure(self) -> int:
@@ -1710,17 +1828,15 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         if not prompt:
             return ""
 
-        # 用LLM将演化日志润色为叙事
-        return self.llm.chat(
+        # [v1.7 P2-2] 用 safe_call 保护 LLM 调用，失败时返回空字符串
+        return safe_call(
+            self.llm.chat,
             f"你是一个小说叙事助手。请根据以下信息，写一段150-300字的'物是人非'场景描写：\n\n{prompt}",
-            temperature=0.7, max_tokens=1024
+            temperature=0.7, max_tokens=1024,
+            fallback="",
         )
 
-    def get_npc_evolution_summary(self, npc_id: str) -> list[dict]:
-        """获取某个NPC的完整演化历史"""
-        if self.npc_life_evolution:
-            return self.npc_life_evolution.get_evolution_summary(npc_id)
-        return []
+    # [v1.4 P1-5] get_npc_evolution_summary 已迁移到 NpcFacadeMixin
 
     def generate_novel_chapter(self) -> dict:
         if not self.narrative or not self.player_state or not self.world_state:
@@ -2092,6 +2208,10 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             "_history_summaries": self.memory_curator._history_summaries if self.memory_curator else [],
             "_summary_counter": self.memory_curator._summary_counter if self.memory_curator else 0,
             "_summarized_up_to": self.memory_curator._summarized_up_to if self.memory_curator else 0,
+            # [v1.3] 因果链图持久化
+            "causal_graph": self.causal_graph.to_dict() if self.causal_graph else {},
+            # [v1.3] MemoryBrief 状态持久化（md 文件本身在 briefs/ 目录，这里只存触发计数）
+            "memory_brief": self.memory_brief.to_dict() if self.memory_brief else {},
         }
 
         atomic_write_json(
@@ -2121,7 +2241,7 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                     self._persisted_narrative_count = len(self.narrative_history)
         except Exception as e:
-            logger.warning("Narrative history save failed: %s", e)
+            logger.warning("Narrative history save failed: %s", e, exc_info=True)
 
         # [Bug#35] None 检查
         if self.hundred_life_book:
@@ -2130,6 +2250,13 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
     def _load_game_state(self, world_id: str):
         world_dir = self.save_manager.base_dir / world_id
         state_file = world_dir / "state" / "game_state.json"
+
+        # [v1.3] 确保 visual_engine 的输出目录指向该世界
+        if self.visual_engine:
+            self.visual_engine.set_world_id(world_id)
+        # [v1.3] 确保 memory_brief 的输出目录指向该世界
+        if self.memory_brief:
+            self.memory_brief.set_world_id(world_id)
 
         if not state_file.exists():
             return
@@ -2140,15 +2267,72 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                 logger.error("Failed to load game_state.json (no valid backup)")
                 return
         except Exception as e:
-            logger.error("Failed to parse game_state.json: %s", e)
+            logger.error("Failed to parse game_state.json: %s", e, exc_info=True)
             return
 
+        # 恢复核心子系统状态（age/level/butterfly/death/visual 等）
+        self._load_core_subsystem_state(gs)
+
+        # [v9] 叙事历史加载 — 优先从 JSONL 文件读取，向后兼容旧格式
+        narrative_file = world_dir / "state" / "narrative_history.jsonl"
+        if narrative_file.exists():
+            self.narrative_history = []
+            try:
+                with open(narrative_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            self.narrative_history.append(json.loads(line))
+            except Exception as e:
+                logger.warning("Failed to load narrative_history.jsonl: %s", e, exc_info=True)
+                self.narrative_history = gs.get("narrative_history", [])
+        else:
+            # 向后兼容：旧存档中 narrative_history 在 game_state.json 里
+            self.narrative_history = gs.get("narrative_history", [])
+        self.last_novel_checkpoint = gs.get("last_novel_checkpoint", 0)
+        # [v10.1] 同步已持久化计数器，避免下次保存时重复追加
+        self._persisted_narrative_count = len(self.narrative_history)
+        self._narrative_compressed = False
+        # [v10.1] 恢复 Curator 历史摘要
+        if self.memory_curator:
+            self.memory_curator._history_summaries = gs.get("_history_summaries", [])
+            self.memory_curator._summary_counter = gs.get("_summary_counter", 0)
+            self.memory_curator._summarized_up_to = gs.get("_summarized_up_to", 0)
+        # [v1.3] 恢复因果链图
+        try:
+            from .causal_graph import CausalGraph
+            cg_data = gs.get("causal_graph", {})
+            if cg_data and isinstance(cg_data, dict) and cg_data.get("nodes"):
+                self.causal_graph = CausalGraph.from_dict(cg_data)
+                logger.info("[CausalGraph] 已恢复 %d 个因果节点", len(self.causal_graph.nodes))
+        except Exception as _e:
+            logger.warning("[CausalGraph] 加载失败: %s", _e)
+        # [v1.3] 恢复 MemoryBrief 触发状态（md 文件本身在 briefs/ 目录已加载）
+        try:
+            mb_data = gs.get("memory_brief", {})
+            if mb_data and self.memory_brief:
+                self.memory_brief.from_dict(mb_data)
+                logger.info("[MemoryBrief] 已恢复状态: update_count=%d, last_sleep_day=%d",
+                            self.memory_brief._update_count, self.memory_brief._last_sleep_day)
+        except Exception as _e:
+            logger.warning("[MemoryBrief] 状态恢复失败: %s", _e)
+        logger.info("Loaded game_state: narrative_history=%d entries, summaries=%d",
+                     len(self.narrative_history),
+                     len(gs.get("_history_summaries", [])))
+
+        # 恢复世界子系统状态（reputation/skill/quest/influence/perception/evolution/timekeeper）
+        self._load_world_subsystem_state(gs)
+
+        # 恢复 v10+ 模块状态（reviewer/skill_library/foreshadow/auditor/registry/reflection 等）
+        self._load_v10_module_state(gs)
+
+    def _load_core_subsystem_state(self, gs: dict):
+        """从存档字典恢复核心子系统状态（age/level/butterfly/death/visual 等）"""
         age_data = gs.get("age_system", {})
         if self.age_system:
             self.age_system.from_dict(age_data)
 
         book_data = gs.get("hundred_life_book", {})
-        # [Bug#35] None 检查
         if self.hundred_life_book:
             self.hundred_life_book.load_book()
 
@@ -2168,7 +2352,6 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         butterfly_data = gs.get("butterfly", {})
         if self.butterfly:
             self.butterfly.from_dict(butterfly_data)
-            # 向后兼容：旧存档将审批门字段单独存放在 butterfly_approval_gate 下
             ba_data = gs.get("butterfly_approval_gate")
             if ba_data:
                 self.butterfly.approval_gate_enabled = ba_data.get("enabled", self.butterfly.approval_gate_enabled)
@@ -2192,35 +2375,8 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         if self.visual_engine:
             self.visual_engine.image_history = visual_data.get("image_history", [])
 
-        # [v9] 叙事历史加载 — 优先从 JSONL 文件读取，向后兼容旧格式
-        narrative_file = world_dir / "state" / "narrative_history.jsonl"
-        if narrative_file.exists():
-            self.narrative_history = []
-            try:
-                with open(narrative_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line:
-                            self.narrative_history.append(json.loads(line))
-            except Exception as e:
-                logger.warning("Failed to load narrative_history.jsonl: %s", e)
-                self.narrative_history = gs.get("narrative_history", [])
-        else:
-            # 向后兼容：旧存档中 narrative_history 在 game_state.json 里
-            self.narrative_history = gs.get("narrative_history", [])
-        self.last_novel_checkpoint = gs.get("last_novel_checkpoint", 0)
-        # [v10.1] 同步已持久化计数器，避免下次保存时重复追加
-        self._persisted_narrative_count = len(self.narrative_history)
-        self._narrative_compressed = False
-        # [v10.1] 恢复 Curator 历史摘要
-        if self.memory_curator:
-            self.memory_curator._history_summaries = gs.get("_history_summaries", [])
-            self.memory_curator._summary_counter = gs.get("_summary_counter", 0)
-            self.memory_curator._summarized_up_to = gs.get("_summarized_up_to", 0)
-        logger.info("Loaded game_state: narrative_history=%d entries, summaries=%d",
-                     len(self.narrative_history),
-                     len(gs.get("_history_summaries", [])))
-
+    def _load_world_subsystem_state(self, gs: dict):
+        """从存档字典恢复世界子系统状态（reputation/skill/quest/influence/perception/evolution/timekeeper）"""
         rep_data = gs.get("reputation", {})
         if self.reputation_system:
             self.reputation_system.from_dict(rep_data)
@@ -2247,8 +2403,6 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             self.npc_life_evolution.from_dict(evo_data)
 
         self._last_year_evolved = gs.get("_last_year_evolved", 0)
-
-        # [v10.1] 恢复世界事件触发状态，避免加载后立即触发事件
         self._last_event_day = gs.get("_last_event_day", 0)
         self._consecutive_passive = gs.get("_consecutive_passive", 0)
 
@@ -2260,7 +2414,8 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             if tk_data:
                 self.timekeeper.from_dict(tk_data)
 
-        # [v10] 加载新模块状态
+    def _load_v10_module_state(self, gs: dict):
+        """从存档字典恢复 v10+ 模块状态（reviewer/skill_library/foreshadow/auditor/registry/reflection 等）"""
         reviewer_data = gs.get("narrative_reviewer", {})
         if self.narrative_reviewer and reviewer_data:
             self.narrative_reviewer.from_dict(reviewer_data)
@@ -2277,7 +2432,7 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         if self.memory_curator and curator_data:
             self.memory_curator.from_dict(curator_data)
 
-        # [v10++] 加载 NPC 技能自学库状态（Voyager/Hermes 式）
+        # [v10++] 加载 NPC 技能自学库状态
         skill_lib_data = gs.get("npc_skill_library", {})
         if self.npc_skill_library and skill_lib_data:
             try:
@@ -2286,7 +2441,7 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                 logger.info("Loaded NPCSkillLibrary: %d NPCs with skills, %d total skills",
                            stats["npcs_with_skills"], stats["total_skills"])
             except Exception as e:
-                logger.warning("Failed to load npc_skill_library: %s", e)
+                logger.warning("Failed to load npc_skill_library: %s", e, exc_info=True)
 
         # [v10+] 加载新模块状态
         fs_data = gs.get("foreshadow_lifecycle", {})
@@ -2306,7 +2461,7 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                            len(self.npc_registry.local_npcs),
                            len(self.npc_registry.passerby_npcs))
             except Exception as e:
-                logger.warning("Failed to load npc_registry, creating new: %s", e)
+                logger.warning("Failed to load npc_registry, creating new: %s", e, exc_info=True)
                 self.npc_registry = NpcRegistry(max_passersby=10)
         else:
             self.npc_registry = NpcRegistry(max_passersby=10)
@@ -2320,7 +2475,7 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                 logger.info("Loaded CharacterStateManager: %d tracked characters, %d total changes",
                            stats["tracked_characters"], stats["total_changes"])
             except Exception as e:
-                logger.warning("Failed to load character_state_manager: %s", e)
+                logger.warning("Failed to load character_state_manager: %s", e, exc_info=True)
 
         # [v10++] 加载 NPC 反思机制状态（Generative Agents 式）
         reflection_data = gs.get("npc_reflection", {})
@@ -2331,7 +2486,7 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                 logger.info("Loaded NPCReflection: %d NPCs with insights, %d total insights",
                            stats["npcs_with_insights"], stats["total_insights"])
             except Exception as e:
-                logger.warning("Failed to load npc_reflection: %s", e)
+                logger.warning("Failed to load npc_reflection: %s", e, exc_info=True)
 
         # [v10++] 加载自主记忆管理状态（MemGPT/Letta 式）
         amm_data = gs.get("autonomous_memory", {})
@@ -2342,7 +2497,7 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                 logger.info("Loaded AutonomousMemoryManager: %d total actions",
                            stats["total_actions"])
             except Exception as e:
-                logger.warning("Failed to load autonomous_memory: %s", e)
+                logger.warning("Failed to load autonomous_memory: %s", e, exc_info=True)
 
     def get_map_data(self) -> dict:
         """返回世界地图数据：地点、NPC位置、玩家位置、连线"""
@@ -2459,156 +2614,32 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             world_data = self.novel_importer.import_from_text(text, world_type)
             return {"success": True, "world_data": world_data}
         except Exception as e:
-            logger.error("小说导入失败: %s", e)
+            logger.error("小说导入失败: %s", e, exc_info=True)
             return {"error": str(e)}
 
-    def query_graph_rag(self, question: str) -> dict:
-        """查询知识图谱"""
-        if not self.graph_rag:
-            return {"results": [], "context": ""}
-        results = self.graph_rag.query(question)
-        context = self.graph_rag.get_context_for_prompt(question)
-        return {"results": results, "context": context}
-
-    def get_graph_visualization(self) -> dict:
-        """获取知识图谱可视化数据"""
-        if not self.graph_rag:
-            return {"nodes": [], "edges": []}
-        return self.graph_rag.to_visualization_data()
-
-    # ── [v10] 新增 API 方法 ────────────────────────────────
-
-    def get_narrative_review(self) -> dict:
-        """获取叙事回顾结果和质量趋势"""
-        if not self.narrative_reviewer:
-            return {"error": "叙事回顾器未初始化"}
-        return {
-            "quality_trend": self.narrative_reviewer.get_quality_trend(),
-            "lessons_count": len(self.narrative_reviewer.lessons),
-            "active_lessons": [
-                l.to_dict() for l in sorted(
-                    self.narrative_reviewer.lessons,
-                    key=lambda x: x.importance, reverse=True
-                )[:10]
-            ],
-        }
-
-    def get_task_board(self) -> dict:
-        """获取世界任务板状态"""
-        if not self.world_task_board:
-            return {"error": "任务板未初始化"}
-        return self.world_task_board.get_board_summary()
-
-    def get_butterfly_approvals(self) -> list[dict]:
-        """获取待审批的蝴蝶效应"""
-        if not self.butterfly:
-            return []
-        return self.butterfly.get_pending_approvals()
-
-    def approve_butterfly_effect(self, approval_id: str,
-                                  decision: str = "approve") -> dict:
-        """审批蝴蝶效应后果"""
-        if not self.butterfly:
-            return {"error": "蝴蝶效应系统未初始化"}
-        result = self.butterfly.approve_consequence(approval_id, decision)
-        if result.get("approved") and result.get("impact"):
-            # 执行已批准的后果
-            consequence = self.butterfly.generate_consequence(
-                result["impact"], self.world_state
-            )
-            if consequence:
-                if self.world_agent:
-                    self.world_agent.update_world_state(self.world_state, consequence)
-                result["consequence"] = consequence.model_dump()
-                # [v10.5] 使用实例级 trigger_hook 而非全局
-                self.trigger_hook("on_butterfly_approval",
-                             approval_id=approval_id, consequence=consequence)
-        return result
-
-    def get_curator_stats(self) -> dict:
-        """获取记忆 Curator 统计"""
-        if not self.memory_curator:
-            return {"error": "Curator 未初始化"}
-        return self.memory_curator.get_curate_stats()
-
-    def get_npc_procedural_stats(self) -> dict:
-        """获取 NPC 程序性记忆统计"""
-        if not self.npc_procedural_memory:
-            return {"error": "NPC程序性记忆未初始化"}
-        return self.npc_procedural_memory.get_stats()
-
-    def get_npc_skill_library_stats(self) -> dict:
-        """[v10++] 获取 NPC 技能自学库统计（Voyager/Hermes 式）"""
-        if not self.npc_skill_library:
-            return {"error": "NPC技能自学库未初始化"}
-        return self.npc_skill_library.get_stats()
-
-    def get_multi_agent_narrative_stats(self) -> dict:
-        """[v10+++] 获取多智能体分工叙事统计（Agents' Room 式）"""
-        if not self.multi_agent_narrative:
-            return {"error": "多智能体叙事引擎未初始化"}
-        return self.multi_agent_narrative.get_stats()
-
-    def get_v10_dashboard(self) -> dict:
-        """[v10] 获取所有 v10 新系统的概览面板"""
-        return {
-            "narrative_review": self.get_narrative_review(),
-            "task_board": self.get_task_board(),
-            "curator": self.get_curator_stats(),
-            "procedural_memory": self.get_npc_procedural_stats(),
-            "butterfly_pending": len(self.get_butterfly_approvals()),
-            "memory_quality": {
-                "working_memory": self.memory.get_working_memory_context(3) if self.memory else "",
-                "identity_count": self.memory.get_identity_count() if self.memory else 0,
-            },
-            # [v10+] 新增
-            "foreshadow": self.get_foreshadow_health(),
-            "continuity_audit": self.get_continuity_audit(),
-            # [v10++] NPC 技能自学库（Voyager/Hermes 式）
-            "skill_library": self.get_npc_skill_library_stats(),
-            # [v10+++] 多智能体分工叙事（Agents' Room 式）
-            "multi_agent_narrative": self.get_multi_agent_narrative_stats(),
-        }
-
-    # ── [v10+] 新增 API 方法 ──────────────────────────────
-
-    def get_foreshadow_health(self) -> dict:
-        """获取伏笔健康报告"""
-        if not self.foreshadow_lifecycle:
-            return {"error": "伏笔生命周期管理器未初始化"}
-        current_day = self.world_state.current_day if self.world_state else 0
-        report = self.foreshadow_lifecycle.get_health_report(current_day)
-        report["active_hooks"] = self.foreshadow_lifecycle.get_active_hooks()
-        report["reminder_mode"] = self.foreshadow_lifecycle.reminder_mode
-        # 静默模式下 hooks_for_prompt 为空
-        report["hooks_for_prompt"] = self.foreshadow_lifecycle.get_hooks_for_prompt(5)
-        return report
-
-    def get_continuity_audit(self) -> dict:
-        """获取连续性审计结果"""
-        if not self.continuity_auditor:
-            return {"error": "连续性审计器未初始化"}
-        return {
-            "latest_report": self.continuity_auditor.get_latest_report(),
-            "trend": self.continuity_auditor.get_audit_trend(),
-        }
+    # [v1.4 P1-5] 以下元数据/统计查询方法已迁移到 MetaFacadeMixin
+    # （query_graph_rag / get_graph_visualization / get_narrative_review /
+    #  get_task_board / get_butterfly_approvals / approve_butterfly_effect /
+    #  get_curator_stats / get_npc_procedural_stats / get_npc_skill_library_stats /
+    #  get_multi_agent_narrative_stats / get_v10_dashboard /
+    #  get_foreshadow_health / get_continuity_audit）
 
     def close(self):
         # [v10.1] 仅调用 save_game("auto")（内部已调用 _save_game_state），避免重复写入
         try:
             self.save_game("auto")
         except Exception as e:
-            logger.warning("save_game(auto) failed during close: %s", e)
+            logger.warning("save_game(auto) failed during close: %s", e, exc_info=True)
         # [v10.1] 关闭后台任务队列
         try:
             if self.task_queue and hasattr(self.task_queue, "stop"):
                 self.task_queue.stop()
         except Exception as e:
-            logger.warning("task_queue stop failed during close: %s", e)
+            logger.warning("task_queue stop failed during close: %s", e, exc_info=True)
         # [Bug] 关闭 LLM httpx 连接池，防止连接泄漏
         try:
             if self.llm:
                 self.llm.close()
         except Exception as e:
-            logger.warning("LLM close failed during close: %s", e)
+            logger.warning("LLM close failed during close: %s", e, exc_info=True)
         self.save_manager.close_all()

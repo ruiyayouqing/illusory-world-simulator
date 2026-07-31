@@ -34,7 +34,7 @@ def _write_config(config: dict):
             if hasattr(eng, 'narrative') and getattr(eng.narrative, 'style_manager', None):
                 eng.narrative.style_manager.invalidate_cache()
         except Exception as e:
-            logger.warning("Failed to invalidate narrative style manager cache: %s", e)
+            logger.warning("Failed to invalidate narrative style manager cache: %s", e, exc_info=True)
 
 
 def _mask_key(key: str) -> str:
@@ -120,6 +120,10 @@ class FullSettingsRequest(BaseModel):
     narrative_max_chars: int = 1000  # [v10.6] 叙事最大字数
     streaming_enabled: bool = True  # [v11] 流式输出开关
     action_validation_enabled: bool = True  # [v11] 行动合理性校验开关
+    # [v1.3] NPC 私密档案开关（普通模式，小说模式默认启用）
+    npc_private_facts_enabled: bool = False
+    # [v1.3] 小说模式叙事视角（默认第三人称，可改为 first/second）
+    novel_perspective: str = "third"
     v10: dict = {}  # [v10.6+] v10高级配置
 
 
@@ -132,7 +136,7 @@ async def load_config():
         config = json.loads(config_path.read_text(encoding="utf-8"))
         config = decrypt_config_keys(config)
     except Exception as e:
-        logger.error("Failed to load config: %s", e)
+        logger.error("Failed to load config: %s", e, exc_info=True)
         return {}
     active_llm = config.get("active_llm_profile", "")
     active_image = config.get("active_image_profile", "")
@@ -176,7 +180,7 @@ async def load_config_raw():
         config = json.loads(config_path.read_text(encoding="utf-8"))
         config = decrypt_config_keys(config)
     except Exception as e:
-        logger.error("Failed to load config: %s", e)
+        logger.error("Failed to load config: %s", e, exc_info=True)
         return {}
     active_llm = config.get("active_llm_profile", "")
     active_cheap = config.get("active_cheap_llm_profile", "")
@@ -211,7 +215,7 @@ async def save_config(req: ConfigRequest):
             config = json.loads(config_path.read_text(encoding="utf-8"))
             config = decrypt_config_keys(config)
         except Exception as e:
-            logger.warning("Failed to load existing config: %s", e)
+            logger.warning("Failed to load existing config: %s", e, exc_info=True)
             config = {}
     config.setdefault("llm", {})
     config["llm"]["api_key"] = req.api_key
@@ -221,7 +225,7 @@ async def save_config(req: ConfigRequest):
         _encrypt_config(config)
         _write_config(config)
     except Exception as e:
-        logger.error("Failed to save config: %s", e)
+        logger.error("Failed to save config: %s", e, exc_info=True)
         return {"error": f"保存配置失败: {e}"}
     return {"status": "ok"}
 
@@ -302,7 +306,7 @@ async def apply_model_profile(req: ApplyProfileRequest):
         try:
             eng.reload_llm_from_config()
         except Exception as e:
-            logger.error("Failed to hot-reload LLM after profile apply: %s", e)
+            logger.error("Failed to hot-reload LLM after profile apply: %s", e, exc_info=True)
     return {"status": "ok", "llm": config.get("llm", {}), "image": config.get("image", {}), "cheap_llm": config.get("cheap_llm", {}), "dialogue_llm": config.get("dialogue_llm", {})}
 
 
@@ -370,7 +374,7 @@ async def save_model_profile(req: SaveProfileRequest):
         try:
             eng.reload_llm_from_config()
         except Exception as e:
-            logger.error("Failed to hot-reload LLM after profile save: %s", e)
+            logger.error("Failed to hot-reload LLM after profile save: %s", e, exc_info=True)
     return {"status": "ok"}
 
 
@@ -413,6 +417,69 @@ async def delete_model_profile(req: DeleteProfileRequest):
     _encrypt_config(config)
     _write_config(config)
     return {"status": "ok"}
+
+
+@router.post("/clear-all-keys")
+async def clear_all_api_keys():
+    """[共享分发] 一键清除所有模型 API Key（当前配置 + 已保存的 profile）。
+    保留 base_url / model_name 等非敏感字段，仅清空 api_key。"""
+    config_path = BASE_DIR / "config.json"
+    if not config_path.exists():
+        return {"error": "配置文件不存在"}
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    # 先解密，避免已加密的 key 被二次处理
+    config = decrypt_config_keys(config)
+
+    cleared_current = 0
+    cleared_profiles = 0
+
+    # 清除当前配置的 5 个 section
+    for section in ("llm", "cheap_llm", "dialogue_llm", "image", "embedding"):
+        if isinstance(config.get(section), dict):
+            if config[section].get("api_key"):
+                config[section]["api_key"] = ""
+                cleared_current += 1
+
+    # 清除已保存 profile 中的 api_key（保留 profile 本身和 base_url/model_name）
+    for profile_type in ("llm_profiles", "image_profiles", "cheap_llm_profiles", "dialogue_llm_profiles"):
+        profiles = config.get(profile_type, {})
+        if isinstance(profiles, dict):
+            for name, profile in profiles.items():
+                if isinstance(profile, dict) and profile.get("api_key"):
+                    profile["api_key"] = ""
+                    cleared_profiles += 1
+
+    _encrypt_config(config)
+    _write_config(config)
+
+    # [P5] 删除加密主密钥文件，确保即使 config.json.bak* 备份含加密 key 也无法被解密。
+    # 下次启动时 _get_or_create_key 会生成全新的 .secret_key，旧加密数据彻底失效。
+    try:
+        secret_key_path = BASE_DIR / ".secret_key"
+        if secret_key_path.exists():
+            secret_key_path.unlink()
+            logger.info("Removed .secret_key after clearing all API keys")
+        # 重置 security 模块的主密钥缓存，强制下次调用时重新生成
+        import modules.security as _sec
+        _sec._master_key = None
+    except Exception as e:
+        logger.warning("Failed to remove .secret_key: %s", e, exc_info=True)
+
+    # 热更新 LLM 实例，避免使用已失效的旧 key
+    eng = get_engine()
+    if eng and hasattr(eng, 'reload_llm_from_config'):
+        try:
+            eng.reload_llm_from_config()
+        except Exception as e:
+            logger.error("Failed to hot-reload LLM after clearing keys: %s", e, exc_info=True)
+
+    logger.info("Cleared %d current keys and %d profile keys", cleared_current, cleared_profiles)
+    return {
+        "status": "ok",
+        "cleared_current": cleared_current,
+        "cleared_profiles": cleared_profiles,
+        "total": cleared_current + cleared_profiles,
+    }
 
 
 @router.post("/settings")
@@ -488,6 +555,15 @@ async def save_full_settings(req: FullSettingsRequest):
     config["game"]["narrative_max_chars"] = req.narrative_max_chars  # [v10.6]
     config["game"]["streaming_enabled"] = req.streaming_enabled  # [v11]
     config["game"]["action_validation_enabled"] = req.action_validation_enabled  # [v11]
+    # [v1.3] 保存 NPC 私密档案开关到 features.npc_private_facts
+    config.setdefault("features", {})
+    config["features"].setdefault("npc_private_facts", {})
+    config["features"]["npc_private_facts"]["enabled"] = req.npc_private_facts_enabled
+    # [v1.3] 保存小说模式叙事视角（默认 third，可改为 first/second）
+    valid_perspectives = ("first", "second", "third")
+    np = req.novel_perspective if req.novel_perspective in valid_perspectives else "third"
+    config.setdefault("novel_roleplay", {})
+    config["novel_roleplay"]["narrative_perspective"] = np
     # [v10.6+] 保存v10高级配置
     if req.v10:
         config["v10"] = req.v10
@@ -509,13 +585,13 @@ async def save_full_settings(req: FullSettingsRequest):
             try:
                 eng.reload_llm_from_config()
             except Exception as e:
-                logger.error("Failed to hot-reload LLM config: %s", e)
+                logger.error("Failed to hot-reload LLM config: %s", e, exc_info=True)
     # [v10.6+] 运行时应用v10高级配置
     if eng and req.v10:
         try:
             _apply_v10_config(eng, req.v10)
         except Exception as e:
-            logger.error("Failed to apply v10 config: %s", e)
+            logger.error("Failed to apply v10 config: %s", e, exc_info=True)
     return {"status": "ok"}
 
 
@@ -623,65 +699,203 @@ async def get_engine_stats():
 
 @router.get("/health")
 async def health_check():
-    """[P3-7] 健康检查端点：验证各服务可用性"""
+    """[P3-7] 健康检查端点：验证各服务可用性
+    [v1.4] 增强：加入 uptime / MetaDB / saves 目录 / config.json 检查"""
     eng = get_engine()
+    import time as _time
+    from pathlib import Path as _Path
+    from .deps import BASE_DIR as _BASE_DIR, get_meta_db as _get_meta_db
+
+    # [v1.4] 从 server.py 读取启动时间（如果可访问）
+    try:
+        import server as _server_mod
+        uptime = round(_time.time() - _server_mod._APP_START_TIME, 1)
+    except Exception:
+        uptime = 0
+
     health = {
         "status": "healthy",
         "checks": {},
         "timestamp": __import__('datetime').datetime.now().isoformat(),
+        "uptime_seconds": uptime,
     }
 
     # 检查 engine 是否初始化
     if not eng:
         health["status"] = "degraded"
         health["checks"]["engine"] = {"status": "down", "error": "engine not initialized"}
-        return health
-    health["checks"]["engine"] = {"status": "up"}
-
-    # 检查 LLM 是否可用
-    if hasattr(eng, 'main_llm') and eng.main_llm:
-        health["checks"]["llm"] = {"status": "up", "model": eng.main_llm.model_name}
     else:
-        health["checks"]["llm"] = {"status": "down", "error": "main_llm not initialized"}
+        health["checks"]["engine"] = {"status": "up"}
+        health["current_world"] = eng.current_world_id or ""
+        if eng.world_state:
+            health["current_day"] = eng.world_state.current_day
+
+        # 检查 LLM 是否可用
+        if hasattr(eng, 'main_llm') and eng.main_llm:
+            # [v1.7 P2-5] 读取 _api_reachable 字段，启动后实际不可达时报 degraded
+            api_reachable = getattr(eng.main_llm, '_api_reachable', None)
+            if api_reachable is False:
+                health["checks"]["llm"] = {
+                    "status": "degraded",
+                    "model": eng.main_llm.model_name,
+                    "error": "API 不可达（_preflight_check 失败）",
+                }
+                health["status"] = "degraded"
+            else:
+                health["checks"]["llm"] = {
+                    "status": "up",
+                    "model": eng.main_llm.model_name,
+                    "api_reachable": api_reachable,
+                }
+        else:
+            health["checks"]["llm"] = {"status": "down", "error": "main_llm not initialized"}
+            health["status"] = "degraded"
+
+        # [v10.5+] 检查对话模型（可选，未配置时不影响整体健康度）
+        if hasattr(eng, 'dialogue_llm') and eng.dialogue_llm:
+            dlg_reachable = getattr(eng.dialogue_llm, '_api_reachable', None)
+            health["checks"]["dialogue_llm"] = {
+                "status": "up" if dlg_reachable is not False else "degraded",
+                "model": eng.dialogue_llm.model_name,
+                "api_reachable": dlg_reachable,
+            }
+        else:
+            health["checks"]["dialogue_llm"] = {"status": "skip", "note": "未配置，回退到主力模型"}
+
+        # 检查嵌入服务
+        if hasattr(eng, '_embedding_function') and eng._embedding_function:
+            health["checks"]["embedding"] = {
+                "status": "up",
+                "model": getattr(eng._embedding_function, 'model_name', 'unknown'),
+            }
+        else:
+            health["checks"]["embedding"] = {"status": "down", "error": "embedding not configured"}
+
+        # 检查记忆存储
+        if hasattr(eng, 'memory') and eng.memory:
+            try:
+                # [v1.7 P2-5] 优先调用 health_check() 获取完整信息（含 path / 异常细节）
+                if hasattr(eng.memory, 'health_check'):
+                    mem_health = eng.memory.health_check()
+                    health["checks"]["memory"] = {
+                        "status": "up" if mem_health.get("status") == "ok" else "down",
+                        **{k: v for k, v in mem_health.items() if k != "status"},
+                    }
+                    if mem_health.get("status") != "ok":
+                        health["status"] = "degraded"
+                else:
+                    count = eng.memory.collection.count()
+                    health["checks"]["memory"] = {"status": "up", "count": count}
+            except Exception as e:
+                health["checks"]["memory"] = {"status": "down", "error": str(e)}
+                health["status"] = "degraded"
+        else:
+            health["checks"]["memory"] = {"status": "down", "error": "memory not initialized"}
+
+        # 检查任务队列
+        if hasattr(eng, 'task_queue') and eng.task_queue:
+            try:
+                stats = eng.task_queue.get_stats()
+                health["checks"]["task_queue"] = {"status": "up", **stats}
+            except Exception as e:
+                health["checks"]["task_queue"] = {"status": "down", "error": str(e)}
+        else:
+            health["checks"]["task_queue"] = {"status": "down", "error": "task_queue not initialized"}
+
+    # [v1.4] MetaDB 探活
+    try:
+        db = _get_meta_db()
+        if db is not None:
+            worlds = db.list_worlds()
+            health["checks"]["meta_db"] = {"status": "up", "world_count": len(worlds) if worlds else 0}
+        else:
+            health["checks"]["meta_db"] = {"status": "down", "error": "MetaDB not initialized"}
+            health["status"] = "degraded"
+    except Exception as e:
+        health["checks"]["meta_db"] = {"status": "down", "error": str(e)[:100]}
         health["status"] = "degraded"
 
-    # [v10.5+] 检查对话模型（可选，未配置时不影响整体健康度）
-    if hasattr(eng, 'dialogue_llm') and eng.dialogue_llm:
-        health["checks"]["dialogue_llm"] = {"status": "up", "model": eng.dialogue_llm.model_name}
-    else:
-        health["checks"]["dialogue_llm"] = {"status": "skip", "note": "未配置，回退到主力模型"}
-
-    # 检查嵌入服务
-    if hasattr(eng, '_embedding_function') and eng._embedding_function:
-        health["checks"]["embedding"] = {
-            "status": "up",
-            "model": getattr(eng._embedding_function, 'model_name', 'unknown'),
-        }
-    else:
-        health["checks"]["embedding"] = {"status": "down", "error": "embedding not configured"}
-
-    # 检查记忆存储
-    if hasattr(eng, 'memory') and eng.memory:
-        try:
-            count = eng.memory.collection.count()
-            health["checks"]["memory"] = {"status": "up", "count": count}
-        except Exception as e:
-            health["checks"]["memory"] = {"status": "down", "error": str(e)}
+    # [v1.4] saves 目录检查
+    try:
+        saves_dir = _BASE_DIR / "saves"
+        if saves_dir.exists():
+            index_file = saves_dir / "index.json"
+            health["checks"]["saves_dir"] = {
+                "status": "up",
+                "index_json_exists": index_file.exists(),
+            }
+        else:
+            health["checks"]["saves_dir"] = {"status": "down", "error": "saves dir not found"}
             health["status"] = "degraded"
-    else:
-        health["checks"]["memory"] = {"status": "down", "error": "memory not initialized"}
+    except Exception as e:
+        health["checks"]["saves_dir"] = {"status": "down", "error": str(e)[:100]}
 
-    # 检查任务队列
-    if hasattr(eng, 'task_queue') and eng.task_queue:
-        try:
-            stats = eng.task_queue.get_stats()
-            health["checks"]["task_queue"] = {"status": "up", **stats}
-        except Exception as e:
-            health["checks"]["task_queue"] = {"status": "down", "error": str(e)}
-    else:
-        health["checks"]["task_queue"] = {"status": "down", "error": "task_queue not initialized"}
+    # [v1.4] config.json 检查
+    try:
+        config_file = _BASE_DIR / "config.json"
+        health["checks"]["config"] = {"status": "up" if config_file.exists() else "down"}
+        if not config_file.exists():
+            health["status"] = "degraded"
+    except Exception:
+        pass
 
     return health
+
+
+@router.get("/metrics")
+async def metrics_endpoint():
+    """[v1.4] Prometheus 风格的指标端点（供监控用）
+    需鉴权：/api/metrics 已加入敏感路径列表"""
+    eng = get_engine()
+    lines = []
+
+    if eng and eng.llm:
+        try:
+            router = eng.llm
+            if hasattr(router, "_task_call_counts"):
+                for task, count in router._task_call_counts.items():
+                    lines.append(f'llm_calls_total{{task="{task}"}} {count}')
+            if hasattr(router, "_daily_cost_usd"):
+                lines.append(f"llm_cost_usd_today {router._daily_cost_usd}")
+            if hasattr(router, "_budget_events"):
+                lines.append(f"llm_budget_events_total {len(router._budget_events)}")
+        except Exception:
+            pass
+
+    if eng and eng.llm_cache:
+        try:
+            stats = eng.llm_cache.get_stats()
+            lines.append(f'llm_cache_hits_total {stats.get("hits", 0)}')
+            lines.append(f'llm_cache_misses_total {stats.get("misses", 0)}')
+            hit_rate = stats.get("hit_rate", 0)
+            lines.append(f"llm_cache_hit_rate {hit_rate}")
+        except Exception:
+            pass
+
+    if eng and hasattr(eng, "task_queue"):
+        try:
+            depth = len(eng.task_queue._queue) if hasattr(eng.task_queue, "_queue") else 0
+            lines.append(f"task_queue_depth {depth}")
+        except Exception:
+            pass
+
+    if eng:
+        try:
+            lines.append(f"narrative_history_length {len(eng.narrative_history)}")
+            lines.append(f"npc_count {len(eng.npc_states)}")
+            if eng.world_state:
+                lines.append(f"game_day {eng.world_state.current_day}")
+        except Exception:
+            pass
+
+    if eng and eng.memory:
+        try:
+            count = eng.memory.collection.count()
+            lines.append(f"chroma_memories_total {count}")
+        except Exception:
+            pass
+
+    return {"metrics": "\n".join(lines), "format": "prometheus"}
 
 
 @router.post("/upload-description")
@@ -896,6 +1110,9 @@ async def test_llm_connection(req: TestConnectionRequest):
 
         elif model_type == "image":
             # 文生图模型：发送最小尺寸的图片生成请求
+            # [Bug 修复] 必须根据 API 类型区分请求格式，否则固定用 image_size + "square_hd"
+            # 会导致 OpenAI 兼容 API 报 500（它需要 size 参数），而 "square_hd" 这种尺寸值
+            # 对两种 API 都是非法的。复用 visual_engine.py 的分支逻辑保持一致。
             import httpx
             # 标准化 URL：确保以 /images/generations 结尾
             url = base_url.rstrip("/")
@@ -906,11 +1123,23 @@ async def test_llm_connection(req: TestConnectionRequest):
                     url = url + "/v1/images/generations"
                 else:
                     url = url + "/images/generations"
+            # 和 visual_engine.py 保持一致的判断逻辑
+            is_openai_compat = "agnes" in url or "openai" in url
+            if is_openai_compat:
+                # OpenAI 兼容格式：用 size 参数，合法尺寸如 1024x1024
+                payload = {"model": model_name, "prompt": "a red apple", "n": 1, "size": "1024x1024"}
+            else:
+                # SiliconFlow 原生格式：用 image_size 参数，和游戏默认值一致
+                payload = {
+                    "model": model_name, "prompt": "a red apple",
+                    "image_size": "1024x576", "batch_size": 1,
+                    "num_inference_steps": 20, "guidance_scale": 7.5,
+                }
             async with httpx.AsyncClient(timeout=25.0) as http:
                 r = await http.post(
                     url,
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                    json={"model": model_name, "prompt": "test", "image_size": "square_hd"},
+                    json=payload,
                 )
             if r.status_code == 200:
                 return {"ok": True, "msg": "连接成功"}
@@ -937,7 +1166,9 @@ async def test_llm_connection(req: TestConnectionRequest):
                 r = await http.post(
                     url,
                     headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                    json={"model": model_name, "input": "test"},
+                    # [Bug 修复] 补 encoding_format 参数，和 embedding_function.py 实际调用保持一致
+                    # 否则某些 API 在缺该参数时会返回 400，导致测试联通失败但游戏内能用
+                    json={"model": model_name, "input": "test", "encoding_format": "float"},
                 )
             if r.status_code == 200:
                 return {"ok": True, "msg": "连接成功"}

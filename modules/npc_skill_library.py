@@ -81,11 +81,15 @@ class NPCSkillLibrary:
     """
     NPC 技能自学库。
     从成功交互中提取技能，存储到向量库，后续检索复用。
+
+    [v1.6] 新增 embedding_sim 参数：用 Embedding 余弦相似度替换字符级 Jaccard，
+    提升中文场景模式匹配准确度。未注入或失败时自动回退到 Jaccard / 关键词匹配。
     """
 
-    def __init__(self, llm=None, memory_store=None):
+    def __init__(self, llm=None, memory_store=None, embedding_sim=None):
         self.llm = llm
         self.memory_store = memory_store
+        self._embedding_sim = embedding_sim
         self._skills: dict[str, dict[str, Skill]] = {}  # npc_id -> {skill_id -> Skill}
         self._max_skills_per_npc: int = 30
         self._skill_index: dict[str, list[str]] = {}  # npc_id -> [skill_id] 按有效性排序
@@ -93,6 +97,10 @@ class NPCSkillLibrary:
     def set_memory_store(self, memory_store):
         """注入向量库（MemoryStore 在世界加载后由 game_engine 注入）。"""
         self.memory_store = memory_store
+
+    def set_embedding_sim(self, embedding_sim):
+        """注入 Embedding 相似度计算器（延迟注入）。"""
+        self._embedding_sim = embedding_sim
 
     def learn_from_success(
         self, npc_id: str, npc_name: str, context: str, action: str,
@@ -183,23 +191,43 @@ class NPCSkillLibrary:
 }}"""
 
         try:
-            # [v10.6] 技能数据使用 chat_json，不用 "narrative" schema（技能没有 narrative 字段）
-            result_data = self.llm.chat_json(prompt, temperature=0.3)
+            # [Bug 修复] 必须传 schema_hint，否则 chat_json 会走默认的"叙事格式"分支
+            # （要求输出 {"narrative", "options"}），导致返回的 JSON 里没有 name 等字段，
+            # 全部 fallback 到默认值，生成"未命名技能"空壳，占用技能槽
+            schema_hint = (
+                '{"name":"技能名称(2-8字)","description":"技能描述",'
+                '"skill_type":"combat|social|trade|exploration|survival|craft|study",'
+                '"context_pattern":"适用场景描述","action_template":"行动模板",'
+                '"tags":["标签"]}'
+            )
+            result_data = self.llm.chat_json(prompt, temperature=0.3, schema_hint=schema_hint)
 
             if not result_data or "error" in result_data:
                 return None
 
+            # [Bug 修复] 字段校验：拒绝 name 缺失或为空的空壳技能
+            skill_name = (result_data.get("name") or "").strip()
+            if not skill_name:
+                logger.debug("Skill extraction skipped: LLM returned empty name, action=%s", action[:80])
+                return None
+
+            # 校验 skill_type 在合法枚举内
+            valid_types = {"combat", "social", "trade", "exploration", "survival", "craft", "study"}
+            skill_type = result_data.get("skill_type", "social")
+            if skill_type not in valid_types:
+                skill_type = "social"
+
             return Skill(
                 skill_id=f"skill_{uuid.uuid4().hex[:8]}",
-                name=result_data.get("name", "未命名技能"),
+                name=skill_name[:30],
                 description=result_data.get("description", ""),
-                skill_type=result_data.get("skill_type", "social"),
+                skill_type=skill_type,
                 context_pattern=result_data.get("context_pattern", ""),
                 action_template=result_data.get("action_template", ""),
                 learned_turn=turn,
                 learned_day=day,
                 last_used_turn=turn,
-                tags=result_data.get("tags", []),
+                tags=result_data.get("tags", []) if isinstance(result_data.get("tags"), list) else [],
                 source_memory=f"{action[:100]}",
             )
         except Exception as e:
@@ -218,9 +246,14 @@ class NPCSkillLibrary:
         return None
 
     def _text_similarity(self, a: str, b: str) -> float:
-        """字符级 Jaccard 相似度。"""
+        """[v1.6] 文本相似度：优先 Embedding 余弦，回退字符级 Jaccard。"""
         if not a or not b:
             return 0.0
+        if self._embedding_sim and self._embedding_sim.is_available():
+            sim = self._embedding_sim.similarity(a, b)
+            if sim >= 0:
+                return sim
+        # 回退：字符级 Jaccard
         set_a = set(a)
         set_b = set(b)
         return len(set_a & set_b) / len(set_a | set_b) if (set_a | set_b) else 0.0
@@ -246,6 +279,8 @@ class NPCSkillLibrary:
         """
         获取与当前上下文相关的技能。
         优先返回高有效性 + 场景匹配的技能。
+
+        [v1.6] 场景匹配优先使用 Embedding 余弦相似度，回退关键词匹配。
         """
         skills = self._skills.get(npc_id, {})
         if not skills:
@@ -254,7 +289,7 @@ class NPCSkillLibrary:
         # 计算每个技能的匹配度
         scored = []
         for skill in skills.values():
-            # 场景匹配度（简单关键词匹配）
+            # 场景匹配度（[v1.6] 优先 Embedding，回退关键词）
             match_score = self._context_match(skill.context_pattern, context)
             # 综合评分 = 有效性 × 0.6 + 匹配度 × 0.4
             total_score = skill.effectiveness * 0.6 + match_score * 0.4
@@ -264,10 +299,15 @@ class NPCSkillLibrary:
         return [s for s, _ in scored[:top_k]]
 
     def _context_match(self, pattern: str, context: str) -> float:
-        """场景模式匹配度。"""
+        """[v1.6] 场景模式匹配度：优先 Embedding 余弦，回退关键词匹配。"""
         if not pattern or not context:
             return 0.0
-        # 提取模式中的关键词
+        # 优先 Embedding
+        if self._embedding_sim and self._embedding_sim.is_available():
+            sim = self._embedding_sim.similarity(pattern, context)
+            if sim >= 0:
+                return sim
+        # 回退：关键词匹配
         keywords = [k.strip() for k in pattern.replace("，", " ").replace(",", " ").split() if len(k.strip()) >= 2]
         if not keywords:
             return 0.0

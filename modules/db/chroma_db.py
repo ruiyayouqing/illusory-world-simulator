@@ -52,6 +52,13 @@ class MemoryStore:
         # 双过程记忆：身份语义核心（长期整合层）
         self.identity_collection = self._get_or_create_with_migration(
             f"{collection_name}_identity", ef)
+        # [v12] 小说人物扮演：分离静态/动态/因果记忆
+        self.novel_facts_collection = self._get_or_create_with_migration(
+            f"{collection_name}_novel_facts", ef)
+        self.player_events_collection = self._get_or_create_with_migration(
+            f"{collection_name}_player_events", ef)
+        self.causal_events_collection = self._get_or_create_with_migration(
+            f"{collection_name}_causal", ef)
         logger.info("MemoryStore ready at %s (collections: %d)",
                      persist_dir, self.collection.count())
         # [Bug H3] 创建实例级副本，避免实例方法原地修改类级 _ranked_weights
@@ -119,6 +126,31 @@ class MemoryStore:
     def _content_hash(self, text: str) -> str:
         return hashlib.md5(text.encode("utf-8")).hexdigest()[:16]
 
+    def _find_similar_existing(self, collection, text: str,
+                                threshold: float = 0.92) -> tuple[str | None, float]:
+        """[B] 在指定 collection 中查找与 text 高度相似的现有条目。
+        返回 (existing_id, similarity)。无相似条目或集合为空时返回 (None, 0.0)。
+        用于 6 个无 MD5 去重的 collection（npc/foreshadow/identity/novel_facts/
+        player_events/causal）写入前的向量相似度去重，
+        避免同一事实被反复存储导致检索结果被重复条目占据。
+        ChromaDB 使用 cosine 距离，similarity = 1 - distance。"""
+        try:
+            if collection.count() == 0:
+                return None, 0.0
+            results = collection.query(query_texts=[text], n_results=1)
+            if not results or not results.get("ids") or not results["ids"][0]:
+                return None, 0.0
+            existing_id = results["ids"][0][0]
+            distance = (results["distances"][0][0]
+                        if results.get("distances") else 1.0)
+            similarity = max(0.0, 1.0 - distance)
+            if similarity >= threshold:
+                return existing_id, similarity
+            return None, similarity
+        except Exception as e:
+            logger.debug("Similarity dedup query failed: %s", e)
+            return None, 0.0
+
     def add_memory(self, text: str, metadata: dict | None = None) -> str:
         if metadata is None:
             metadata = {}
@@ -161,6 +193,12 @@ class MemoryStore:
 
     def add_npc_memory(self, npc_name: str, content: str, npc_type: str = "character"):
         """存储NPC设定（角色卡）"""
+        # [B] 向量相似度去重：同名 NPC 高度相似设定直接返回已有 id
+        existing_id, sim = self._find_similar_existing(
+            self.npc_collection, content, threshold=0.92)
+        if existing_id:
+            logger.debug("NPC memory dedup hit (sim=%.3f): %s", sim, npc_name)
+            return existing_id
         doc_id = f"npc_{npc_name}_{uuid.uuid4().hex[:12]}"
         self.npc_collection.add(
             documents=[content],
@@ -195,6 +233,12 @@ class MemoryStore:
 
     def add_foreshadow(self, content: str, day: int, importance: str = "normal"):
         """存储伏笔/重要剧情线索"""
+        # [B] 向量相似度去重：高度相似的伏笔直接返回已有 id
+        existing_id, sim = self._find_similar_existing(
+            self.foreshadow_collection, content, threshold=0.92)
+        if existing_id:
+            logger.debug("Foreshadow dedup hit (sim=%.3f)", sim)
+            return existing_id
         doc_id = f"foreshadow_{self.foreshadow_collection.count() + 1}"
         self.foreshadow_collection.add(
             documents=[content],
@@ -322,6 +366,145 @@ class MemoryStore:
         metadata["access_count"] = 0
         metadata["memory_type"] = memory_type
         return self.add_memory(text, metadata)
+
+    # ── [v1.6 P1-8] 情感记忆系统：Plutchik 8 类情感标记 ──
+    # joy(喜悦) sadness(悲伤) anger(愤怒) fear(恐惧)
+    # surprise(惊讶) disgust(厌恶) trust(信任) anticipation(期待)
+    _EMOTION_TYPES = {
+        "joy", "sadness", "anger", "fear",
+        "surprise", "disgust", "trust", "anticipation",
+    }
+
+    def add_emotional_memory(self, text: str, emotion_type: str,
+                              emotional_weight: float = 0.5,
+                              valence: float = 0.0,
+                              arousal: float = 0.5,
+                              metadata: dict | None = None,
+                              importance: float = 0.5,
+                              related_entities: list[str] = None) -> str:
+        """
+        [v1.6 P1-8] 存储带情感标记的记忆。
+        - emotion_type: Plutchik 8 类之一（joy/sadness/anger/fear/surprise/disgust/trust/anticipation）
+        - emotional_weight: 情感强度 0-1（影响检索权重）
+        - valence: 效价 -1(消极) ~ +1(积极)，0=中性
+        - arousal: 唤醒度 0(平静) ~ 1(激动)
+        - related_entities: 关联实体名（NPC/物品/地点），用于按实体检索情感记忆
+        """
+        emotion_type = emotion_type.lower() if emotion_type else "neutral"
+        if emotion_type not in self._EMOTION_TYPES:
+            logger.warning("Unknown emotion_type '%s', stored as 'neutral'", emotion_type)
+            emotion_type = "neutral"
+        if metadata is None:
+            metadata = {}
+        metadata.update({
+            "emotion_type": emotion_type,
+            "emotional_weight": min(1.0, max(0.0, emotional_weight)),
+            "valence": min(1.0, max(-1.0, valence)),
+            "arousal": min(1.0, max(0.0, arousal)),
+            "importance": min(1.0, max(0.0, importance)),
+            "access_count": 0,
+            "memory_type": "emotional",
+            "related_entities": ",".join(related_entities or []),
+        })
+        return self.add_memory(text, metadata)
+
+    def search_by_emotion(self, emotion_type: str,
+                           n_results: int = 5,
+                           min_weight: float = 0.0,
+                           related_entity: str = None) -> list[dict]:
+        """
+        [v1.6 P1-8] 按情感类型检索记忆。
+        - emotion_type: 8 类情感之一
+        - min_weight: 仅返回情感强度 ≥ 此值的记忆
+        - related_entity: 过滤含此实体的记忆
+        """
+        emotion_type = (emotion_type or "").lower()
+        if emotion_type not in self._EMOTION_TYPES:
+            return []
+        if self.collection.count() == 0:
+            return []
+        # ChromaDB where 子句仅支持等值匹配，min_weight 与 entity 过滤在内存中做
+        try:
+            where = {"emotion_type": emotion_type}
+            results = self.collection.get(where=where, limit=min(n_results * 4, 200))
+        except Exception as e:
+            logger.debug("search_by_emotion query failed: %s", e)
+            return []
+        if not results or not results.get("ids"):
+            return []
+        items = []
+        for i, mid in enumerate(results["ids"]):
+            meta = results["metadatas"][i] if results.get("metadatas") else {}
+            weight = float(meta.get("emotional_weight", 0.0) or 0.0)
+            if weight < min_weight:
+                continue
+            if related_entity:
+                ents_str = meta.get("related_entities", "") or ""
+                if related_entity not in ents_str.split(","):
+                    continue
+            items.append({
+                "id": mid,
+                "text": results["documents"][i] if results.get("documents") else "",
+                "metadata": meta,
+                "emotion_type": emotion_type,
+                "emotional_weight": weight,
+                "valence": float(meta.get("valence", 0.0) or 0.0),
+                "arousal": float(meta.get("arousal", 0.0) or 0.0),
+            })
+        # 按情感强度降序
+        items.sort(key=lambda x: x["emotional_weight"], reverse=True)
+        return items[:n_results]
+
+    def get_emotional_summary(self, related_entity: str = None) -> dict:
+        """
+        [v1.6 P1-8] 获取情感记忆统计：8 类情感的强度分布、效价均值。
+        - related_entity: 限定某实体（NPC/物品），None=全局
+        """
+        if self.collection.count() == 0:
+            return {"emotions": {}, "total": 0, "avg_valence": 0.0}
+        try:
+            results = self.collection.get(
+                where={"memory_type": "emotional"},
+                limit=500,
+            )
+        except Exception as e:
+            logger.debug("get_emotional_summary failed: %s", e)
+            return {"emotions": {}, "total": 0, "avg_valence": 0.0}
+        if not results or not results.get("ids"):
+            return {"emotions": {}, "total": 0, "avg_valence": 0.0}
+        emotion_map: dict[str, dict] = {}
+        total = 0
+        valence_sum = 0.0
+        for i, mid in enumerate(results["ids"]):
+            meta = results["metadatas"][i] if results.get("metadatas") else {}
+            if meta.get("memory_type") != "emotional":
+                continue
+            if related_entity:
+                ents_str = meta.get("related_entities", "") or ""
+                if related_entity not in ents_str.split(","):
+                    continue
+            etype = meta.get("emotion_type", "neutral")
+            weight = float(meta.get("emotional_weight", 0.0) or 0.0)
+            valence = float(meta.get("valence", 0.0) or 0.0)
+            entry = emotion_map.setdefault(etype, {"count": 0, "total_weight": 0.0, "valence_sum": 0.0})
+            entry["count"] += 1
+            entry["total_weight"] += weight
+            entry["valence_sum"] += valence
+            total += 1
+            valence_sum += valence
+        emotions = {
+            et: {
+                "count": v["count"],
+                "avg_weight": round(v["total_weight"] / v["count"], 3) if v["count"] else 0.0,
+                "avg_valence": round(v["valence_sum"] / v["count"], 3) if v["count"] else 0.0,
+            }
+            for et, v in emotion_map.items()
+        }
+        return {
+            "emotions": emotions,
+            "total": total,
+            "avg_valence": round(valence_sum / total, 3) if total else 0.0,
+        }
 
     # [v10] 可配置的检索权重（可通过 configure_ranked_weights 修改）
     _ranked_weights = {
@@ -466,6 +649,13 @@ class MemoryStore:
     def add_identity_trait(self, trait_type: str, content: str,
                            source: str = "consolidation"):
         """存储长期身份特征（价值观/性格/习惯/社交记录）"""
+        # [B] 向量相似度去重：同一类身份特征高度相似时返回已有 id
+        existing_id, sim = self._find_similar_existing(
+            self.identity_collection, content, threshold=0.92)
+        if existing_id:
+            logger.debug("Identity trait dedup hit (sim=%.3f, type=%s)",
+                         sim, trait_type)
+            return existing_id
         doc_id = f"identity_{trait_type}_{uuid.uuid4().hex[:12]}"
         self.identity_collection.add(
             documents=[content],
@@ -520,6 +710,232 @@ class MemoryStore:
         ids = self.identity_collection.get()["ids"]
         if ids:
             self.identity_collection.delete(ids=ids)
+
+    # ── [v12] 小说人物扮演：分离式记忆管理 ────────────────
+
+    def add_novel_fact(self, text: str, chapter: int = 0,
+                       entities: list[str] = None,
+                       fact_type: str = "event",
+                       importance: float = 0.8) -> str:
+        """
+        [v12] 存储原著既定事实（导入小说时调用）。
+        fact_type: character_relation / world_event / foreshadow / character_state
+        这些是静态只读记忆，进入游戏时注入，游戏过程中不修改。
+        """
+        # [B] 向量相似度去重：原著事实跨章节重复时返回已有 id
+        existing_id, sim = self._find_similar_existing(
+            self.novel_facts_collection, text, threshold=0.92)
+        if existing_id:
+            logger.debug("Novel fact dedup hit (sim=%.3f, chapter=%s)",
+                         sim, chapter)
+            return existing_id
+        doc_id = f"novel_{self.novel_facts_collection.count() + 1}"
+        metadata = {
+            "chapter": chapter,
+            "entities": ",".join(entities or []),
+            "fact_type": fact_type,
+            "source": "novel",
+            "is_active": True,
+            "superseded_by": "",
+            "importance": importance,
+        }
+        self.novel_facts_collection.add(
+            documents=[text], metadatas=[metadata], ids=[doc_id],
+        )
+        return doc_id
+
+    def search_novel_facts(self, query: str, n_results: int = 5,
+                           fact_type: str = None,
+                           active_only: bool = True) -> list[dict]:
+        """[v12] 检索原著事实，默认只返回仍有效的事实"""
+        if self.novel_facts_collection.count() == 0:
+            return []
+        n = min(n_results, self.novel_facts_collection.count())
+        where_filter = {}
+        if active_only:
+            where_filter["is_active"] = True
+        if fact_type:
+            where_filter["fact_type"] = fact_type
+        try:
+            results = self.novel_facts_collection.query(
+                query_texts=[query], n_results=n,
+                where=where_filter if where_filter else None,
+            )
+        except Exception:
+            results = self.novel_facts_collection.query(
+                query_texts=[query], n_results=n,
+            )
+        return [
+            {"id": results["ids"][0][i],
+             "text": results["documents"][0][i],
+             "metadata": results["metadatas"][0][i],
+             "source": "novel_facts",
+             "score": 1.0 - (results["distances"][0][i]
+                             if results.get("distances") else 0.0)}
+            for i in range(len(results["ids"][0]))
+        ]
+
+    def supersede_novel_fact(self, fact_id: str, superseded_by: str = "player_action"):
+        """
+        [v12] 标记原著事实已被玩家行为取代。
+        不删除数据，只标记 is_active=False。
+        """
+        try:
+            existing = self.novel_facts_collection.get(ids=[fact_id])
+            if existing and existing["metadatas"]:
+                meta = existing["metadatas"][0]
+                meta["is_active"] = False
+                meta["superseded_by"] = superseded_by
+                self.novel_facts_collection.update(
+                    ids=[fact_id], metadatas=[meta])
+        except Exception as e:
+            logger.warning("supersede_novel_fact failed: %s", e)
+
+    def add_player_event(self, text: str, turn: int = 0, day: int = 0,
+                         caused_by: list[str] = None,
+                         affects_entities: list[str] = None,
+                         event_type: str = "action",
+                         importance: float = 0.5) -> str:
+        """
+        [v12] 存储玩家游玩产生的新事件。
+        caused_by: 这个事件由哪些先前事件导致（因果链回溯用）
+        affects_entities: 受影响的实体名
+        """
+        # [B] 向量相似度去重：玩家事件高度相似时返回已有 id
+        existing_id, sim = self._find_similar_existing(
+            self.player_events_collection, text, threshold=0.92)
+        if existing_id:
+            logger.debug("Player event dedup hit (sim=%.3f, turn=%s)",
+                         sim, turn)
+            return existing_id
+        doc_id = f"player_{self.player_events_collection.count() + 1}"
+        metadata = {
+            "turn": turn, "day": day,
+            "caused_by": ",".join(caused_by or []),
+            "affects": ",".join(affects_entities or []),
+            "event_type": event_type,
+            "source": "game",
+            "is_active": True,
+            "importance": importance,
+        }
+        self.player_events_collection.add(
+            documents=[text], metadatas=[metadata], ids=[doc_id],
+        )
+        return doc_id
+
+    def search_player_events(self, query: str, n_results: int = 5,
+                             active_only: bool = True) -> list[dict]:
+        """[v12] 检索玩家新剧情"""
+        if self.player_events_collection.count() == 0:
+            return []
+        n = min(n_results, self.player_events_collection.count())
+        where_filter = {"is_active": True} if active_only else None
+        try:
+            results = self.player_events_collection.query(
+                query_texts=[query], n_results=n, where=where_filter,
+            )
+        except Exception:
+            results = self.player_events_collection.query(
+                query_texts=[query], n_results=n,
+            )
+        return [
+            {"id": results["ids"][0][i],
+             "text": results["documents"][0][i],
+             "metadata": results["metadatas"][0][i],
+             "source": "player_events",
+             "score": 1.0 - (results["distances"][0][i]
+                             if results.get("distances") else 0.0)}
+            for i in range(len(results["ids"][0]))
+        ]
+
+    def add_causal_event(self, text: str, cause: str, effect: str,
+                         turn: int = 0, day: int = 0,
+                         entities: list[str] = None) -> str:
+        """
+        [v12] 存储因果事件链节点。
+        用于追踪"A导致B，B导致C"的因果链。
+        """
+        # [B] 向量相似度去重：相似因果节点返回已有 id
+        existing_id, sim = self._find_similar_existing(
+            self.causal_events_collection, text, threshold=0.92)
+        if existing_id:
+            logger.debug("Causal event dedup hit (sim=%.3f, turn=%s)",
+                         sim, turn)
+            return existing_id
+        doc_id = f"causal_{self.causal_events_collection.count() + 1}"
+        metadata = {
+            "turn": turn, "day": day,
+            "cause": cause, "effect": effect,
+            "entities": ",".join(entities or []),
+            "source": "causal",
+        }
+        self.causal_events_collection.add(
+            documents=[text], metadatas=[metadata], ids=[doc_id],
+        )
+        return doc_id
+
+    def search_causal_chain(self, query: str, n_results: int = 5) -> list[dict]:
+        """[v12] 检索因果事件链"""
+        if self.causal_events_collection.count() == 0:
+            return []
+        n = min(n_results, self.causal_events_collection.count())
+        results = self.causal_events_collection.query(
+            query_texts=[query], n_results=n,
+        )
+        return [
+            {"id": results["ids"][0][i],
+             "text": results["documents"][0][i],
+             "metadata": results["metadatas"][0][i],
+             "source": "causal",
+             "score": 1.0 - (results["distances"][0][i]
+                             if results.get("distances") else 0.0)}
+            for i in range(len(results["ids"][0]))
+        ]
+
+    def search_unified(self, query: str, n_results: int = 5,
+                       current_turn: int = 0) -> list[dict]:
+        """
+        [v12] 统一检索：原著事实 + 玩家新剧情 + 因果链。
+        玩家新剧情优先级高于原著（因为玩家在改写历史），
+        但原著事实如果未被取代，仍然生效。
+        """
+        novel = self.search_novel_facts(query, n_results=n_results, active_only=True)
+        player = self.search_player_events(query, n_results=n_results, active_only=True)
+        causal = self.search_causal_chain(query, n_results=n_results)
+
+        # 合并：玩家事件优先（权重1.2x），原著事实次之（1.0x），因果链补充（0.8x）
+        for r in player:
+            r["score"] = r.get("score", 0.5) * 1.2
+            r["priority"] = "high"
+        for r in novel:
+            r["score"] = r.get("score", 0.5) * 1.0
+            r["priority"] = "normal"
+        for r in causal:
+            r["score"] = r.get("score", 0.5) * 0.8
+            r["priority"] = "supplement"
+
+        merged = player + novel + causal
+        merged.sort(key=lambda x: x.get("score", 0), reverse=True)
+        return merged[:n_results]
+
+    def get_novel_facts_count(self) -> int:
+        return self.novel_facts_collection.count()
+
+    def get_player_events_count(self) -> int:
+        return self.player_events_collection.count()
+
+    def clear_novel_facts(self):
+        """清除原著事实（新小说导入时调用）"""
+        ids = self.novel_facts_collection.get()["ids"]
+        if ids:
+            self.novel_facts_collection.delete(ids=ids)
+
+    def clear_player_events(self):
+        """清除玩家事件（新游戏开始时调用）"""
+        for col in [self.player_events_collection, self.causal_events_collection]:
+            ids = col.get()["ids"]
+            if ids:
+                col.delete(ids=ids)
 
     def close(self):
         try:

@@ -88,14 +88,86 @@ class SceneDetector:
     # 内省叙事类型（GraphRAG 有负面效果）
     INTROSPECTIVE_TYPES = {SceneType.INTROSPECTIVE}
 
-    def __init__(self):
+    # [L] 按世界类型扩展的关键词表
+    # 基础 SCENE_KEYWORDS 是通用的，但不同世界类型有专属词汇（如仙侠的"筑基"、科幻的"星舰"）
+    # 这些额外关键词会合并到基础关键词里，提升场景检测精度
+    WORLD_TYPE_EXTRA_KEYWORDS: dict[str, dict[SceneType, list[str]]] = {
+        "historical": {  # 历史/穿越
+            SceneType.SOCIAL: ["朝堂", "科举", "皇帝", "藩镇", "使节", "贡品", "奏折", "御史"],
+            SceneType.ACTION: ["兵变", "谋反", "锦衣卫", "东厂", "禁军", "边关"],
+        },
+        "wuxia": {  # 武侠
+            SceneType.ACTION: ["江湖", "内功", "外功", "轻功", "暗器", "毒药", "解药", "武林", "盟主", "仇家", "比武"],
+            SceneType.SOCIAL: ["门派", "掌门", "师兄", "师妹", "师姐", "师弟"],
+            SceneType.STUDY: ["秘籍", "心法", "招式"],
+        },
+        "xianxia": {  # 仙侠/修真
+            SceneType.STUDY: ["修真", "筑基", "金丹", "元婴", "渡劫", "飞升", "灵气", "灵石",
+                              "法器", "丹药", "宗门", "长老", "功法", "参悟", "顿悟"],
+            SceneType.ACTION: ["妖兽", "魔修", "斗法", "雷劫"],
+            SceneType.SOCIAL: ["弟子", "师尊", "同门"],
+        },
+        "fantasy": {  # 奇幻
+            SceneType.ACTION: ["魔法", "咒语", "法师", "骑士", "巨龙", "精灵", "矮人", "巫师",
+                              "圣剑", "咒文", "魔物"],
+            SceneType.COMMERCE: ["魔药", "冒险者公会", "委托"],
+            SceneType.SOCIAL: ["国王", "公主", "贵族"],
+        },
+        "scifi": {  # 科幻
+            SceneType.ACTION: ["飞船", "星舰", "机器人", "殖民", "外星", "激光", "机甲"],
+            SceneType.STUDY: ["量子", "纳米", "基因", "脑机"],
+            SceneType.EXPLORATION: ["赛博", "虚拟现实", "殖民星", "虫洞", "星系"],
+            SceneType.SOCIAL: ["联邦", "帝国", "议会"],
+        },
+        "postapocalyptic": {  # 末日/废土
+            SceneType.ACTION: ["丧尸", "变异体", "辐射", "病毒", "感染者"],
+            SceneType.EXPLORATION: ["避难所", "搜刮", "废墟", "遗迹", "补给点"],
+            SceneType.SOCIAL: ["幸存者", "营地", "据点", "商队"],
+        },
+        "modern": {  # 现代/都市
+            SceneType.SOCIAL: ["公司", "老板", "同事", "上班", "加班", "会议", "客户"],
+            SceneType.DAILY: ["地铁", "咖啡", "手机", "网络", "外卖"],
+            SceneType.COMMERCE: ["股市", "房地产", "投资", "基金"],
+        },
+    }
+
+    def __init__(self, world_type: str = ""):
         self._history: list[SceneDetectionResult] = []
         self._max_history: int = 20
+        # [L] 当前世界类型（影响场景检测关键词）
+        self._world_type: str = (world_type or "").lower()
+        # [L] 合并后的关键词表（基础 + 世界类型扩展）
+        self._merged_keywords: dict[SceneType, list[str]] = self._build_merged_keywords()
+
+    def _build_merged_keywords(self) -> dict[SceneType, list[str]]:
+        """[L] 构建合并后的关键词表：基础关键词 + 当前世界类型的扩展关键词"""
+        merged = {st: list(kws) for st, kws in self.SCENE_KEYWORDS.items()}
+        extra = self.WORLD_TYPE_EXTRA_KEYWORDS.get(self._world_type, {})
+        for scene_type, kws in extra.items():
+            if scene_type in merged:
+                merged[scene_type].extend(kws)
+            else:
+                merged[scene_type] = list(kws)
+        return merged
+
+    def set_world_type(self, world_type: str):
+        """[L] 设置世界类型并重建关键词表。
+
+        应在 GameEngine 加载世界后调用，让场景检测器适配当前世界类型。
+        """
+        new_wt = (world_type or "").lower()
+        if new_wt != self._world_type:
+            self._world_type = new_wt
+            self._merged_keywords = self._build_merged_keywords()
+            logger.info("SceneDetector world_type updated: %s", new_wt or "(default)")
 
     def detect(self, text: str) -> SceneDetectionResult:
         """
         检测文本的场景类型。
         基于关键词匹配 + 频率统计。
+
+        [L] 使用合并后的关键词表（基础 + 当前世界类型扩展），
+        提升特定世界类型（如仙侠/科幻/末日）的场景检测精度。
         """
         if not text:
             return SceneDetectionResult(SceneType.UNKNOWN, 0.0, [], False)
@@ -103,7 +175,7 @@ class SceneDetector:
         scores: dict[SceneType, int] = {}
         matched: dict[SceneType, list[str]] = {}
 
-        for scene_type, keywords in self.SCENE_KEYWORDS.items():
+        for scene_type, keywords in self._merged_keywords.items():
             count = 0
             matched_kws = []
             for kw in keywords:

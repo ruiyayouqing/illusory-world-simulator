@@ -27,15 +27,32 @@ SCENE_STYLES = {
 
 
 class VisualEngine:
-    def __init__(self, llm: BaseLLM, output_dir: str = "./static/images"):
+    def __init__(self, llm: BaseLLM, output_dir: str = "./static/images/wst"):
         self.llm = llm
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        # [v1.3] base_dir 为 wst 根目录，具体世界子目录由 set_world_id 动态切换
+        self.base_output_dir = Path(output_dir)
+        self.base_output_dir.mkdir(parents=True, exist_ok=True)
+        self.output_dir = self.base_output_dir  # 默认（无 world_id 时向后兼容）
+        self.current_world_id: str = ""
         self.image_history: list[dict] = []
         self.siliconflow_key: str = ""
         self.siliconflow_model: str = KOLORS_MODEL
         self.image_api_url: str = SILICONFLOW_API_DEFAULT
         self.default_image_size: str = "1024x576"
+
+    def set_world_id(self, world_id: str):
+        """[v1.3] 切换当前世界图片输出子目录。
+        新图片保存到 static/images/wst/{world_id}/，与旧图片隔离。
+        旧图片（在 wst/ 根目录）仍可通过 image_url 访问，向后兼容。"""
+        self.current_world_id = world_id or ""
+        if world_id:
+            self.output_dir = self.base_output_dir / world_id
+        else:
+            self.output_dir = self.base_output_dir
+        try:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
 
     def set_api_key(self, key: str):
         self.siliconflow_key = key
@@ -131,10 +148,15 @@ class VisualEngine:
                         if image_url:
                             image_id = f"img_{uuid.uuid4().hex[:8]}"
                             self._download_image(image_url, image_id)
+                            # [v1.3] 图片 URL 包含 world_id 子目录，便于按世界隔离和清理
+                            if self.current_world_id:
+                                img_url = f"/images/wst/{self.current_world_id}/{image_id}.png"
+                            else:
+                                img_url = f"/images/wst/{image_id}.png"  # 向后兼容
                             return {
                                 "generated": True,
                                 "image_id": image_id,
-                                "image_url": f"/images/{image_id}.png",
+                                "image_url": img_url,
                                 "source_url": image_url,
                                 "prompt": prompt,
                             }
@@ -177,9 +199,8 @@ class VisualEngine:
             result["day"] = day
             result["time"] = time_str
             self.image_history.append(result)
-            # [Bug] 限制 image_history 长度，防止无限增长导致存档膨胀
-            if len(self.image_history) > 50:
-                self.image_history = self.image_history[-50:]
+            # [v1.3] 取消 50 张上限：用户希望加载存档后聊天界面能完整呈现所有历史图片（如看小说）
+            # 存档体积由 game_state.json 的原子写入保障，图片 URL 体积可控（每条约 200 字节）
 
         return result
 

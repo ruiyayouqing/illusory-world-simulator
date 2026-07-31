@@ -9,13 +9,17 @@ logger = logging.getLogger("chronoverse.llm_cache")
 
 
 class LLMCache:
-    def __init__(self, llm: BaseLLM, max_size: int = 500):
+    def __init__(self, llm: BaseLLM, max_size: int = 500, ttl: int = 300):
         self.llm = llm
         self.cache: dict[str, dict] = {}
         self.max_size = max_size
+        # [B] TTL 机制：与 MimoLLM._cache 统一为 300s，避免长期缓存过时数据
+        # 原先只有 LRU 淘汰，无 TTL，导致同一 prompt 永远返回旧响应
+        self.ttl: int = int(ttl)
         self.hit_count: int = 0
         self.miss_count: int = 0
         self.semantic_hit_count: int = 0
+        self.expired_count: int = 0  # [B] TTL 过期计数
 
     def _make_key(self, prompt: str, temperature: float) -> str:
         content = f"{prompt}_{temperature}"
@@ -43,6 +47,9 @@ class LLMCache:
         if not self.cache:
             return None
         for key, entry in self.cache.items():
+            # [B] TTL 检查：跳过过期条目
+            if self._is_expired(entry):
+                continue
             # 温度必须相近（±0.2）
             if abs(entry.get("temperature", 0) - temperature) > 0.2:
                 continue
@@ -51,13 +58,32 @@ class LLMCache:
                 return key
         return None
 
+    def _is_expired(self, entry: dict) -> bool:
+        """[B] 检查缓存条目是否过期（TTL）"""
+        if self.ttl <= 0:
+            return False  # TTL=0 表示永不过期
+        age = time.time() - entry.get("timestamp", 0)
+        return age > self.ttl
+
+    def _get_valid_entry(self, key: str) -> dict | None:
+        """[B] 获取未过期的缓存条目，过期则删除并返回 None"""
+        entry = self.cache.get(key)
+        if entry is None:
+            return None
+        if self._is_expired(entry):
+            del self.cache[key]
+            self.expired_count += 1
+            return None
+        return entry
+
     def chat(self, prompt: str, temperature: float = 0.8,
              max_tokens: int = 4096) -> str:
         key = self._make_key(prompt, temperature)
-        # 精确匹配
-        if key in self.cache:
+        # 精确匹配（含 TTL 检查）
+        entry = self._get_valid_entry(key)
+        if entry:
             self.hit_count += 1
-            return self.cache[key]["response"]
+            return entry["response"]
         # [v9] 语义模糊匹配
         semantic_key = self._find_semantic_match(prompt, temperature)
         if semantic_key:
@@ -72,10 +98,11 @@ class LLMCache:
     def chat_json(self, prompt: str, temperature: float = 0.5,
                   max_tokens: int = 4096) -> dict:
         key = self._make_key(prompt, temperature)
-        # 精确匹配
-        if key in self.cache:
+        # 精确匹配（含 TTL 检查）
+        entry = self._get_valid_entry(key)
+        if entry:
             self.hit_count += 1
-            return json.loads(self.cache[key]["response"])
+            return json.loads(entry["response"])
         # [v9] 语义模糊匹配
         semantic_key = self._find_semantic_match(prompt, temperature)
         if semantic_key:
@@ -101,12 +128,20 @@ class LLMCache:
 
     def get_stats(self) -> dict:
         total = self.hit_count + self.miss_count + self.semantic_hit_count
+        # [v1.7 P3-A] 数值型命中率（便于聚合报告与阈值告警）
+        hit_rate_float = round(
+            (self.hit_count + self.semantic_hit_count) / total * 100, 2
+        ) if total > 0 else 0.0
         return {
             "hits": self.hit_count,
             "semantic_hits": self.semantic_hit_count,
             "misses": self.miss_count,
-            "hit_rate": f"{(self.hit_count + self.semantic_hit_count)/total*100:.1f}%" if total > 0 else "0%",
+            "hit_rate": f"{hit_rate_float:.1f}%",
+            "hit_rate_float": hit_rate_float,  # [v1.7 P3-A] 数值型
+            "total_requests": total,  # [v1.7 P3-A] 便于聚合
             "cache_size": len(self.cache),
+            "expired": self.expired_count,  # [B] TTL 过期计数
+            "ttl_seconds": self.ttl,
         }
 
     def clear(self):
@@ -114,3 +149,4 @@ class LLMCache:
         self.hit_count = 0
         self.miss_count = 0
         self.semantic_hit_count = 0
+        self.expired_count = 0

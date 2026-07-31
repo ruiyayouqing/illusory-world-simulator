@@ -33,7 +33,7 @@ var CONFIG_SECTIONS = {
   },
   game: {
     fields: ['narrative_style', 'narrative_style_custom', 'narrative_perspective', 'economy_enabled', 'narrative_max_chars', 'action_validation_enabled'],
-    defaults: { narrative_style: '网文爽文', narrative_style_custom: '', narrative_perspective: 'third', economy_enabled: false, narrative_max_chars: 1000, action_validation_enabled: true }
+    defaults: { narrative_style: '真人作者', narrative_style_custom: '', narrative_perspective: 'third', economy_enabled: false, narrative_max_chars: 1000, action_validation_enabled: true }
   }
 };
 
@@ -45,7 +45,7 @@ function buildConfigFromResponse(res) {
     config[section] = Object.assign({}, def.defaults, res[section] || {});
   }
   config.npc_info_visibility = res.npc_info_visibility || 'immersive';
-  config.game = res.game || { narrative_style: '网文爽文' };
+  config.game = res.game || { narrative_style: '真人作者' };
   return config;
 }
 
@@ -77,7 +77,11 @@ function buildFullSettingsBody(config) {
     strip_gray_narrative: config.ui.strip_gray_narrative,
     npc_info_visibility: config.npc_info_visibility,
     economy_enabled: config.game.economy_enabled,
-    narrative_max_chars: parseInt(config.game.narrative_max_chars) || 1000
+    narrative_max_chars: parseInt(config.game.narrative_max_chars) || 1000,
+    // [v1.3] NPC 私密档案开关（普通模式）
+    npc_private_facts_enabled: !!(config.features && config.features.npc_private_facts && config.features.npc_private_facts.enabled),
+    // [v1.3] 小说模式叙事视角
+    novel_perspective: (config.novel_roleplay && config.novel_roleplay.narrative_perspective) || 'third'
   };
 }
 
@@ -127,11 +131,20 @@ function collectConfigFromDOM() {
     },
     npc_info_visibility: $('st_npc_visibility').value,
     game: {
-      narrative_style: $('st_narrative_style') ? $('st_narrative_style').value : '章回体',
+      narrative_style: $('st_narrative_style') ? $('st_narrative_style').value : '真人作者',
       narrative_style_custom: $('st_custom_style') ? $('st_custom_style').value : '',
       economy_enabled: $('st_economy_enabled').checked,
       narrative_max_chars: parseInt($('st_narrative_max_chars').value) || 1000,
       action_validation_enabled: $('st_action_validation') ? $('st_action_validation').checked : false
+    },
+    novel_roleplay: {
+      narrative_perspective: $('st_novel_perspective') ? $('st_novel_perspective').value : 'third'
+    },
+    // [v1.3] NPC 私密档案开关（普通模式）
+    features: {
+      npc_private_facts: {
+        enabled: $('st_npc_private_facts') ? $('st_npc_private_facts').checked : false
+      }
     }
   };
 }
@@ -180,5 +193,13 @@ function fillDOMFromConfig(c) {
   $('st_fpe').checked = fp.enabled !== false;
   $('st_economy_enabled').checked = c.game?.economy_enabled === true;
   $('st_narrative_max_chars').value = c.game?.narrative_max_chars || 1000;
-  if ($('st_action_validation')) $('st_action_validation').checked = c.game?.action_validation_enabled === true;
+  if ($('st_action_validation')) $('st_action_validation').checked = c.game?.action_validation_enabled !== false;
+  // [v1.3] NPC 私密档案开关（普通模式）
+  if ($('st_npc_private_facts')) {
+    $('st_npc_private_facts').checked = !!(c.features && c.features.npc_private_facts && c.features.npc_private_facts.enabled);
+  }
+  // [v1.3] 小说模式叙事视角（默认 third）
+  if ($('st_novel_perspective')) {
+    $('st_novel_perspective').value = (c.novel_roleplay && c.novel_roleplay.narrative_perspective) || 'third';
+  }
 }

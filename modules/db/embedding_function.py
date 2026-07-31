@@ -196,3 +196,30 @@ class SiliconFlowEmbeddingFunction:
             "base_url": self._base_url,
             "model_name": self._model,
         }
+
+
+def create_embedding_function(config: dict) -> SiliconFlowEmbeddingFunction:
+    """
+    [v12] 工厂函数：从 config.json 创建 SiliconFlowEmbeddingFunction 实例。
+
+    config 结构示例：
+    {
+        "embedding": {
+            "api_key": "sk-xxx",
+            "base_url": "https://api.siliconflow.cn/v1",
+            "model_name": "BAAI/bge-m3",
+            "batch_size": 32,
+            "timeout": 30.0
+        }
+    }
+
+    若 config 缺失关键字段，将返回未启用 API 的实例（回退到本地哈希嵌入，仅测试用）。
+    """
+    emb_cfg = config.get("embedding", {}) if config else {}
+    return SiliconFlowEmbeddingFunction(
+        api_key=emb_cfg.get("api_key", ""),
+        base_url=emb_cfg.get("base_url", "https://api.siliconflow.cn/v1"),
+        model_name=emb_cfg.get("model_name", "BAAI/bge-m3"),
+        batch_size=emb_cfg.get("batch_size", 32),
+        timeout=emb_cfg.get("timeout", 30.0),
+    )

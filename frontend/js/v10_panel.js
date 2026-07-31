@@ -1,12 +1,12 @@
 /* [v10+] v10 面板前端逻辑 */
 
 function openV10Panel() {
-  $('v10PanelModal').style.display = 'flex';
+  $('v10PanelModal').classList.add('on');
   loadV10Foreshadow();
 }
 
 function closeV10Panel() {
-  $('v10PanelModal').style.display = 'none';
+  $('v10PanelModal').classList.remove('on');
 }
 
 function switchV10Tab(tab) {
@@ -20,6 +20,7 @@ function switchV10Tab(tab) {
   else if (tab === 'audit') loadV10Audit();
   else if (tab === 'memory') loadV10Memory();
   else if (tab === 'stats') loadV10Stats();
+  else if (tab === 'worldview') loadV10Worldview();
 }
 
 async function loadV10Foreshadow() {
@@ -268,6 +269,56 @@ async function loadV10Stats() {
   }
 }
 
+/* ========== [v11.1] 世界观微调 ========== */
+async function loadV10Worldview() {
+  var status = $('wv_status');
+  if (status) status.textContent = '加载中...';
+  try {
+    var r = await api('GET', '/api/worldview');
+    if (r.error) {
+      if (status) status.innerHTML = '<span style="color:#ff6b6b">' + r.error + '</span>';
+      return;
+    }
+    $('wv_world_name').value = r.world_name || '';
+    $('wv_description').value = r.description || '';
+    $('wv_weather').value = r.weather || '';
+    $('wv_season').value = r.season || '';
+    $('wv_crisis_level').value = r.crisis_level != null ? r.crisis_level : 0;
+    $('wv_world_intro').value = r.world_intro || '';
+    if (status) status.textContent = '已加载当前世界观设定';
+  } catch (e) {
+    if (status) status.innerHTML = '<span style="color:#ff6b6b">加载失败: ' + e.message + '</span>';
+  }
+}
+
+async function submitV10Worldview() {
+  var status = $('wv_status');
+  if (status) status.textContent = '保存中...';
+  try {
+    var body = {
+      world_name: $('wv_world_name').value,
+      description: $('wv_description').value,
+      weather: $('wv_weather').value,
+      season: $('wv_season').value,
+      crisis_level: parseInt($('wv_crisis_level').value) || 0,
+      world_intro: $('wv_world_intro').value
+    };
+    var r = await api('PATCH', '/api/worldview', body);
+    if (r && r.success) {
+      if (status) status.innerHTML = '<span style="color:#4ecdc4">✓ 已保存并生效（更新字段: ' + (r.updated || []).join(', ') + '）</span>';
+      // 同步顶部世界观简介显示
+      if (r.state && r.state.world_name) {
+        var intro = $('worldIntro');
+        if (intro) intro.textContent = r.state.world_name + (r.state.description ? ' — ' + r.state.description.slice(0, 60) : '');
+      }
+    } else {
+      if (status) status.innerHTML = '<span style="color:#ff6b6b">' + (r && r.error ? r.error : '保存失败') + '</span>';
+    }
+  } catch (e) {
+    if (status) status.innerHTML = '<span style="color:#ff6b6b">保存失败: ' + e.message + '</span>';
+  }
+}
+
 /* ========== [v10] 斜杠命令 + 动态输入提示 ========== */
 var SLASH_COMMANDS = [
   { cmd: '/save', desc: '💾 保存当前游戏' },
@@ -453,13 +504,4 @@ function usePresetWorld(name) {
   }
 }
 
-// 初始页面添加预设按钮
-window.addEventListener('load', function() {
-  var wd = $('wd');
-  if (wd && !document.getElementById('preset_btn')) {
-    var btnWrap = document.createElement('div');
-    btnWrap.style.cssText = 'margin-top:6px;text-align:right';
-    btnWrap.innerHTML = '<button id="preset_btn" onclick="showPresetWorlds()" style="padding:6px 14px;background:transparent;border:1px solid var(--border);border-radius:5px;color:var(--dim);font-size:.82em;cursor:pointer" onmouseover="this.style.borderColor=\'var(--gold)\';this.style.color=\'var(--gold)\'" onmouseout="this.style.borderColor=\'var(--border)\';this.style.color=\'var(--dim)\'">📋 预设开局</button>';
-    wd.parentElement.appendChild(btnWrap);
-  }
-});
+

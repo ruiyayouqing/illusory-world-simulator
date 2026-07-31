@@ -2,7 +2,7 @@ from __future__ import annotations
 import logging
 import uuid
 from typing import Optional
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from .deps import get_engine
@@ -41,6 +41,18 @@ class UpdateNpcRequest(BaseModel):
     ai_behavior: Optional[dict] = None
 
 
+class AiSpawnRequest(BaseModel):
+    """[用户需求] AI 自动生成 NPC 的请求参数"""
+    count: int = 5  # 生成数量 1-10
+    focus: str = "all"  # 角色类型倾向
+    requirement: str = ""  # 用户自定义需求文本
+
+
+class AiSpawnConfirmRequest(BaseModel):
+    """[用户需求] 玩家确认后正式加入世界的请求参数"""
+    designs: list[dict]  # 玩家选中的 NPC 设定列表
+
+
 @router.get("/npcs")
 async def get_npcs():
     engine = get_engine()
@@ -53,7 +65,7 @@ async def get_npcs():
 async def add_npc(req: AddNpcRequest):
     engine = get_engine()
     if not engine or not engine.player_state:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
 
     npc_id = f"npc_{uuid.uuid4().hex[:8]}"
     from modules.schemas import NPCState, RelationEntry
@@ -119,7 +131,7 @@ async def async_create_npcs():
     不阻塞响应，立即返回生成状态。"""
     engine = get_engine()
     if not engine:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     result = engine.npc_spawner.start_async_spawn()
     logger.info("[API] async-create-npcs: %s", result)
     return result
@@ -130,7 +142,7 @@ async def get_npc_spawn_status():
     """[v10+++] 查询后台 NPC 生成状态"""
     engine = get_engine()
     if not engine:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     spawner = engine.npc_spawner
     return {
         "spawning": spawner.is_spawning(),
@@ -139,14 +151,43 @@ async def get_npc_spawn_status():
     }
 
 
+@router.post("/npc/ai-spawn-preview")
+async def ai_spawn_preview(req: AiSpawnRequest):
+    """[用户需求] AI 生成 NPC 设定，返回给玩家预览。
+    玩家确认后调用 /npc/ai-spawn-confirm 才会真正加入世界。"""
+    engine = get_engine()
+    if not engine:
+        raise HTTPException(status_code=503, detail="游戏未初始化")
+    result = engine.npc_spawner.preview_custom_batch(
+        count=req.count,
+        focus=req.focus,
+        requirement=req.requirement,
+    )
+    logger.info("[API] ai-spawn-preview: count=%d focus=%s → designs=%d",
+                req.count, req.focus, len(result.get("designs", [])))
+    return result
+
+
+@router.post("/npc/ai-spawn-confirm")
+async def ai_spawn_confirm(req: AiSpawnConfirmRequest):
+    """[用户需求] 玩家确认后，将选中的 NPC 正式加入世界。"""
+    engine = get_engine()
+    if not engine:
+        raise HTTPException(status_code=503, detail="游戏未初始化")
+    result = engine.npc_spawner.confirm_spawn(req.designs)
+    logger.info("[API] ai-spawn-confirm: designs=%d → spawned=%d",
+                len(req.designs), result.get("spawned", 0))
+    return result
+
+
 @router.get("/npc/{npc_id}")
 async def get_npc_detail(npc_id: str):
     engine = get_engine()
     if not engine or not engine.npc_states:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     npc = engine.npc_states.get(npc_id)
     if not npc:
-        return {"error": "角色不存在"}
+        raise HTTPException(status_code=404, detail="角色不存在")
     data = npc.model_dump()
     return {"npc": data}
 
@@ -155,10 +196,10 @@ async def get_npc_detail(npc_id: str):
 async def update_npc(npc_id: str, req: UpdateNpcRequest):
     engine = get_engine()
     if not engine or not engine.npc_states:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     npc = engine.npc_states.get(npc_id)
     if not npc:
-        return {"error": "角色不存在"}
+        raise HTTPException(status_code=404, detail="角色不存在")
 
     update_data = req.model_dump(exclude_none=True)
 
@@ -231,15 +272,61 @@ async def get_npc_zones():
 async def get_npc_evolution(npc_id: str):
     engine = get_engine()
     if not engine:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     return {"evolution": engine.get_npc_evolution_summary(npc_id)}
+
+
+# ── [v1.3] NPC 私密档案 / 性格演化查询 API ──────────────────
+
+@router.get("/npc-private-facts/{npc_id}")
+async def get_npc_private_facts(npc_id: str):
+    """获取 NPC 私密档案（需 NPC 已生成）"""
+    engine = get_engine()
+    if not engine or not engine.npc_states:
+        raise HTTPException(status_code=503, detail="游戏未初始化")
+    npc = engine.npc_states.get(npc_id)
+    if not npc:
+        raise HTTPException(status_code=404, detail="NPC 不存在")
+    from modules.npc_private_facts import get_private_facts_summary
+    return get_private_facts_summary(npc)
+
+
+@router.get("/npc-personality-history/{npc_id}")
+async def get_npc_personality_history(npc_id: str):
+    """获取 NPC 性格演化历史"""
+    engine = get_engine()
+    if not engine or not engine.npc_states:
+        raise HTTPException(status_code=503, detail="游戏未初始化")
+    npc = engine.npc_states.get(npc_id)
+    if not npc:
+        raise HTTPException(status_code=404, detail="NPC 不存在")
+    from modules.personality_evolution import get_personality_summary
+    return get_personality_summary(npc)
+
+
+@router.post("/npc-private-facts/regenerate/{npc_id}")
+async def regenerate_npc_private_facts(npc_id: str):
+    """手动重新生成 NPC 私密档案（开发者用）"""
+    engine = get_engine()
+    if not engine or not engine.npc_states or not engine.llm:
+        raise HTTPException(status_code=503, detail="游戏未初始化")
+    npc = engine.npc_states.get(npc_id)
+    if not npc:
+        raise HTTPException(status_code=404, detail="NPC 不存在")
+    # 重置标记
+    npc.private_facts_generated = False
+    npc.private_facts = []
+    # 触发生成
+    engine._maybe_generate_private_facts(npc)
+    from modules.npc_private_facts import get_private_facts_summary
+    return get_private_facts_summary(npc)
 
 
 @router.get("/who-is-who")
 async def get_who_is_who():
     engine = get_engine()
     if not engine or not engine.npc_registry:
-        return {"error": "游戏未初始化", "factions": {}}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     directory = engine.npc_registry.get_world_npc_directory()
     recent_rumors = []
     if engine.world_state:
@@ -263,7 +350,7 @@ async def get_who_is_who():
 async def get_npc_who_is_who_detail(npc_id: str):
     engine = get_engine()
     if not engine or not engine.npc_registry:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     info = engine.npc_registry.get_npc_visible_info(npc_id)
     return info
 
@@ -276,10 +363,10 @@ class SetVisibilityRequest(BaseModel):
 async def set_npc_visibility(req: SetVisibilityRequest):
     engine = get_engine()
     if not engine or not engine.npc_registry:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     mode = req.mode
     if mode not in ("immersive", "semi", "god"):
-        return {"error": "invalid mode"}
+        raise HTTPException(status_code=400, detail="invalid mode")
     engine.npc_registry.set_info_visibility(mode)
     # [v9] Bug H2b: 改用 config_routes._write_config 统一写入路径，
     # 确保缓存失效一致且不破坏已加密的 api_key
@@ -310,7 +397,7 @@ class HearRumorRequest(BaseModel):
 async def hear_rumor(req: HearRumorRequest):
     engine = get_engine()
     if not engine or not engine.npc_registry:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     day = engine.world_state.current_day if engine.world_state else 1
     engine.npc_registry.add_rumor(req.npc_id, req.content, day=day, is_major_event=req.is_major_event)
     return {"status": "ok"}
@@ -325,11 +412,11 @@ class MeetNpcRequest(BaseModel):
 async def meet_npc(npc_id: str, req: MeetNpcRequest = None):
     engine = get_engine()
     if not engine or not engine.npc_registry:
-        return {"error": "游戏未初始化"}
+        raise HTTPException(status_code=503, detail="游戏未初始化")
     day = engine.world_state.current_day if engine.world_state else 1
     npc = engine.npc_registry.get_npc(npc_id)
     if not npc:
-        return {"error": "NPC不存在"}
+        raise HTTPException(status_code=404, detail="NPC 不存在")
     if req and req.interaction:
         engine.npc_registry.add_interaction(npc_id, req.interaction, day=day)
     else:

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 import logging
 import importlib
+import json
 from pathlib import Path
 
 logger = logging.getLogger("chronoverse.registry")
@@ -72,6 +73,10 @@ if TYPE_CHECKING:
     from .retrieval.hybrid_retriever import HybridRetriever
     # [v10+] 叙事场景检测器（GraphRAG 动态启停）
     from .narrative_scene_detector import SceneDetector
+    # [v1.6 P1-5] CRAG + HyDE 检索增强
+    from .retrieval.crag_hyde import (
+        CRAGHyDEPipeline, HyDERewriter, CRAGEvaluator, RetrievalAuditLog,
+    )
     # [v10++] 上下文工程
     from .context_engine import ContextEngine
     # [v10++] 角色动态状态管理器（CHIRON 式）
@@ -86,6 +91,14 @@ if TYPE_CHECKING:
     from .multi_agent_narrative import MultiAgentNarrativeEngine
     # [v10++] MCP 工具协议层（Model Context Protocol 兼容）
     from .mcp_tools import MCPToolRegistry
+    # [v1.6] NPC-NPC 对话编排器
+    from .npc_dialogue_manager import NpcDialogueManager
+    # [v1.6] Embedding 相似度计算器
+    from .db.embedding_similarity import EmbeddingSimilarity
+    # [v1.6 P1-6] 长期记忆摘要器 + 审计日志
+    from .memory import LongTermMemorySummarizer, MemoryAuditLog
+    # [v1.6 P1-8] 情感记忆管理器
+    from .memory import EmotionalMemoryManager
 
 
 @dataclass
@@ -149,6 +162,11 @@ class ServiceRegistry:
     # [v10+] 混合检索（BM25 + 向量 + GraphRAG）
     bm25_retriever: Optional["BM25Retriever"] = None
     hybrid_retriever: Optional["HybridRetriever"] = None
+    # [v1.6 P1-5] CRAG + HyDE 检索增强
+    crag_hyde_pipeline: Optional["CRAGHyDEPipeline"] = None
+    hyde_rewriter: Optional["HyDERewriter"] = None
+    crag_evaluator: Optional["CRAGEvaluator"] = None
+    retrieval_audit: Optional["RetrievalAuditLog"] = None
     # [v10+] 叙事场景检测器（GraphRAG 动态启停）
     scene_detector: Optional["SceneDetector"] = None
     # [v10+] SillyTavern 世界书导入器
@@ -159,6 +177,17 @@ class ServiceRegistry:
     multi_agent_narrative: Optional["MultiAgentNarrativeEngine"] = None
     # [v10++] MCP 工具协议层（Model Context Protocol 兼容）
     mcp_registry: Optional["MCPToolRegistry"] = None
+    # [v1.6] NPC-NPC 对话编排器
+    npc_dialogue_manager: Optional["NpcDialogueManager"] = None
+    # [v1.6] Embedding 相似度计算器（procedural_memory / skill_library 共享）
+    embedding_sim: Optional["EmbeddingSimilarity"] = None
+    # [v1.6 P1-6] 长期记忆摘要器 + 审计日志单例
+    # MemoryStore 在世界加载后由 game_engine 注入（set_memory_store）
+    long_term_memory_summarizer: Optional["LongTermMemorySummarizer"] = None
+    memory_audit_log: Optional["MemoryAuditLog"] = None
+    # [v1.6 P1-8] 情感记忆管理器单例
+    # MemoryStore 在世界加载后由 game_engine 注入（set_memory_store）
+    emotional_memory_manager: Optional["EmotionalMemoryManager"] = None
 
 
 def create_services(llm: "MimoLLM", save_manager: "SaveManager",
@@ -220,6 +249,10 @@ def create_services(llm: "MimoLLM", save_manager: "SaveManager",
     from .retrieval.hybrid_retriever import HybridRetriever
     # [v10+] 叙事场景检测器（GraphRAG 动态启停）
     from .narrative_scene_detector import SceneDetector
+    # [v1.6 P1-5] CRAG + HyDE 检索增强
+    from .retrieval.crag_hyde import (
+        CRAGHyDEPipeline, HyDERewriter, CRAGEvaluator, RetrievalAuditLog,
+    )
     # [v10+] SillyTavern 世界书导入器
     from .world_info_importer import WorldInfoImporter
     # [v10++] Agent 自主记忆管理（MemGPT/Letta 式）
@@ -228,6 +261,11 @@ def create_services(llm: "MimoLLM", save_manager: "SaveManager",
     from .multi_agent_narrative import MultiAgentNarrativeEngine
     # [v10++] MCP 工具协议层（Model Context Protocol 兼容）
     from .mcp_tools import MCPToolRegistry, register_builtin_tools
+    # [v1.6] NPC-NPC 对话编排器
+    from .npc_dialogue_manager import NpcDialogueManager
+    # [v1.6] Embedding 相似度计算器（用于 procedural_memory / skill_library）
+    from .db.embedding_function import create_embedding_function
+    from .db.embedding_similarity import EmbeddingSimilarity
 
     svc = ServiceRegistry(llm=llm)
 
@@ -261,8 +299,31 @@ def create_services(llm: "MimoLLM", save_manager: "SaveManager",
     # v7: 创建分支思维规划器，注入到 NPCAgent
     # [v10.5+] BranchPlanner 用于 NPC 行为规划 → 备用模型
     svc.branch_planner = BranchPlanner(_cheap_llm())
+    # [F] 从 config 读取 BranchPlanner 在 offline_evolve 中的触发概率
+    # 默认 0.0（禁用），用户可在 config.json 的 npc.planner_probability 中改为 0.02-0.05 启用
+    try:
+        with open(_config_path, "r", encoding="utf-8") as _f:
+            _cfg = json.load(_f)
+    except Exception:
+        _cfg = {}
+    _planner_prob = float(_cfg.get("npc", {}).get("planner_probability", 0.0))
+    # [v1.6] 创建共享 Embedding 相似度计算器（从 embedding 配置构建）
+    # [Bug] _cfg 直接从 config.json 读取，api_key 仍是 "enc:..." 加密格式，
+    #       导致 SiliconFlow API 返回 401 Unauthorized。需要先解密。
+    from .security import decrypt_config_keys
+    _cfg_decrypted = decrypt_config_keys(_cfg)
+    _embedding_ef = create_embedding_function(_cfg_decrypted)
+    _embedding_sim = EmbeddingSimilarity(_embedding_ef)
+    svc.embedding_sim = _embedding_sim
+    if _embedding_ef._enabled:
+        logger.info("[v1.6] EmbeddingSimilarity enabled for procedural_memory & skill_library")
+    else:
+        logger.info("[v1.6] EmbeddingSimilarity disabled (no api_key), falling back to Jaccard")
     # [v10.5+] NPCAgent 生成 NPC 对话 → 对话模型
-    svc.npc_agent = NPCAgent(_dlg_llm(), planner=svc.branch_planner)
+    svc.npc_agent = NPCAgent(_dlg_llm(), planner=svc.branch_planner,
+                             planner_probability=_planner_prob)
+    if _planner_prob > 0:
+        logger.info("NPC BranchPlanner enabled in offline_evolve, probability=%.3f", _planner_prob)
     svc.economy_system = EconomySystem()
     # [v10.5+] ButterflyEffect 蝴蝶评估/后果生成 → 备用模型
     svc.butterfly = ButterflyEffect(_cheap_llm())
@@ -277,7 +338,10 @@ def create_services(llm: "MimoLLM", save_manager: "SaveManager",
     svc.memoir = PlayerMemoir(_cheap_llm())
     svc.favor_events = NpcFavorEvents(_cheap_llm())
     svc.faction_wars = FactionWars(_cheap_llm())
-    svc.visual_engine = VisualEngine(llm)  # 图像生成用主力
+    svc.visual_engine = VisualEngine(
+        llm,
+        output_dir=str(Path(__file__).parent.parent / "static" / "images" / "wst")
+    )  # 图像生成用主力，输出到 static/images/wst
     svc.gods_codex = GodsCodex()
     svc.destiny_regret = DestinyRegret(_cheap_llm())
     svc.death_system = DeathSystem(_cheap_llm())
@@ -307,13 +371,13 @@ def create_services(llm: "MimoLLM", save_manager: "SaveManager",
     # [v10] 新增服务
     # [v10.5+] NarrativeReviewer 叙事回顾 → 备用模型
     svc.narrative_reviewer = NarrativeReviewer(_cheap_llm())
-    svc.npc_procedural_memory = NPCProceduralMemory()
+    svc.npc_procedural_memory = NPCProceduralMemory(embedding_sim=_embedding_sim)
     svc.world_task_board = WorldTaskBoard()
     # [v10.5+] MemoryCurator 记忆整理 → 备用模型
     svc.memory_curator = MemoryCurator(_cheap_llm())
     # [v10++] NPC 技能自学库（Voyager/Hermes 式）
     # MemoryStore 在世界加载后由 game_engine 注入（set_memory_store）
-    svc.npc_skill_library = NPCSkillLibrary(llm=_cheap_llm(), memory_store=None)
+    svc.npc_skill_library = NPCSkillLibrary(llm=_cheap_llm(), memory_store=None, embedding_sim=_embedding_sim)
     # [v10+] 新增服务
     svc.foreshadow_lifecycle = ForeshadowLifecycle()
     # [v10.5+] ContinuityAuditor 连续性审计 → 备用模型
@@ -335,6 +399,18 @@ def create_services(llm: "MimoLLM", save_manager: "SaveManager",
         scene_detector=svc.scene_detector,
     )
     logger.info("HybridRetriever created (bm25 + graph_rag + scene_detector, vector_store pending)")
+    # [v1.6 P1-5] CRAG + HyDE 检索增强管道
+    # 包装 HybridRetriever，在检索前后增加 HyDE 重写和 CRAG 自评估
+    svc.hyde_rewriter = HyDERewriter(llm=_cheap_llm())
+    svc.crag_evaluator = CRAGEvaluator()
+    svc.retrieval_audit = RetrievalAuditLog()  # 单例
+    svc.crag_hyde_pipeline = CRAGHyDEPipeline(
+        retriever=svc.hybrid_retriever,
+        hyde=svc.hyde_rewriter,
+        evaluator=svc.crag_evaluator,
+        audit=svc.retrieval_audit,
+    )
+    logger.info("CRAG+HyDE pipeline created (wrapping HybridRetriever, audit log enabled)")
     # [v10++] Agent 自主记忆管理（MemGPT/Letta 式）
     # MemoryStore 在世界加载后由 game_engine 注入（set_memory_store）
     svc.autonomous_memory = AutonomousMemoryManager(memory_store=None, llm=_cheap_llm())
@@ -346,6 +422,31 @@ def create_services(llm: "MimoLLM", save_manager: "SaveManager",
     # （因为内置工具需要 engine 引用绑定到各子系统）。
     svc.mcp_registry = MCPToolRegistry()
     logger.info("MCPToolRegistry created (builtin tools will be registered by GameEngine)")
+    # [v1.6] NPC-NPC 对话编排器 → 对话模型（影响叙事质量）
+    # social_network 在世界加载后由 game_engine 注入
+    svc.npc_dialogue_manager = NpcDialogueManager(
+        llm=_dlg_llm(),
+        perception=None,  # 延迟注入
+        social_network=None,
+    )
+    logger.info("NpcDialogueManager created (llm bound, social_network pending)")
+    # [v1.6 P1-6] 长期记忆 LLM 摘要器 + 审计日志单例
+    # MemoryStore 在世界加载后由 game_engine 注入（set_memory_store）
+    from .memory import LongTermMemorySummarizer, memory_audit_log
+    svc.long_term_memory_summarizer = LongTermMemorySummarizer(
+        llm=_cheap_llm(), memory_store=None,
+    )
+    svc.memory_audit_log = memory_audit_log  # 单例，直接复用
+    logger.info("LongTermMemorySummarizer created (llm bound, memory_store pending)")
+    # [v1.6 P1-8] 情感记忆管理器单例
+    # MemoryStore 在世界加载后由 game_engine 注入（set_memory_store）
+    # LLM 用于复杂叙事文本的兜底情感评估（默认走规则零成本）
+    from .memory import EmotionalMemoryManager, set_emotional_manager
+    svc.emotional_memory_manager = EmotionalMemoryManager(
+        llm=_cheap_llm(), memory_store=None,
+    )
+    set_emotional_manager(svc.emotional_memory_manager)  # 注册全局单例
+    logger.info("EmotionalMemoryManager created (llm bound, memory_store pending)")
     # [v10.5] 插件加载移至 GameEngine._init_services，以便钩子绑定到 engine 实例
     return svc
 

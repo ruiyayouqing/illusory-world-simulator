@@ -10,7 +10,7 @@ from .prompt_utils import resolve_location_name  # [Bug] location code → displ
 if TYPE_CHECKING:
     from .game_engine import GameEngine
 
-logger = logging.getLogger("chronoverse")
+logger = logging.getLogger("chronoverse.engine")
 
 
 class SubsystemQueryMixin:

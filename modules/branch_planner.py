@@ -45,6 +45,18 @@ class Branch:
     completed: bool = False
     score: float = 0.0       # [ToT] 评估器打分 0.0-1.0
 
+    def to_dict(self) -> dict:
+        """[v1.6] 序列化用于 API 暴露和前端可视化。"""
+        return {
+            "branch_type": self.branch_type,
+            "objective": self.objective,
+            "priority": round(self.priority, 3),
+            "sub_tasks": list(self.sub_tasks),
+            "actions": list(self.actions),
+            "completed": self.completed,
+            "score": round(self.score, 3),
+        }
+
 
 @dataclass
 class PlanResult:
@@ -62,6 +74,22 @@ class PlanResult:
     pruned_branches: list[str] = field(default_factory=list)      # 被剪枝分支的目标描述
     search_mode: str = "tot"         # "tot" / "fallback" 标记是否走了 ToT 路径
 
+    def to_dict(self) -> dict:
+        """[v1.6] 序列化用于 API 暴露和前端可视化。"""
+        return {
+            "selected_branch": self.selected_branch.to_dict() if self.selected_branch else None,
+            "all_branches": [b.to_dict() for b in self.all_branches],
+            "actions": list(self.actions),
+            "feasible": self.feasible,
+            "issues": list(self.issues),
+            "replan_count": self.replan_count,
+            "score": round(self.score, 3),
+            "attempts": self.attempts,
+            "evaluated_branches": list(self.evaluated_branches),
+            "pruned_branches": list(self.pruned_branches),
+            "search_mode": self.search_mode,
+        }
+
 
 class BranchPlanner:
     """分支思维规划器（ToT 化升级版）"""
@@ -69,28 +97,41 @@ class BranchPlanner:
     def __init__(self, llm: BaseLLM,
                  butterfly_effect: "ButterflyEffect | None" = None,
                  prune_threshold: float = 0.2,
-                 max_search_attempts: int = 3):
+                 max_search_attempts: int = 3,
+                 perception_scope=None):
         """
         Args:
             llm: 底层 LLM 接口
             butterfly_effect: 蝴蝶效应系统（可选，用于评估分支影响）
             prune_threshold: 剪枝阈值，评估分低于此值的分支被剪枝（0.0-1.0）
             max_search_attempts: ToT 搜索最大尝试分支数（回溯上限）
+            perception_scope: [v1.2] 视野隔离器（可选，用于硬执行视野隔离）
         """
         self.llm = llm
         self.butterfly_effect = butterfly_effect
         self.prune_threshold = prune_threshold
         self.max_search_attempts = max_search_attempts
+        # [v1.2] 视野隔离硬执行器
+        self.perception_scope = perception_scope
         self._plan_cache: dict[str, PlanResult] = {}  # agent_id -> last plan
         # [ToT] 评估结果缓存：key = "{agent_id}_{objective}_{day}" -> score
         self._evaluation_cache: dict[str, float] = {}
         self._evaluation_cache_limit: int = 100
+        # [v1.6] 规划历史记录（供前端思维树面板展示）
+        self._plan_history: list[dict] = []
+        self._plan_history_limit: int = 50
 
     def set_butterfly_effect(self, butterfly_effect: "ButterflyEffect | None"):
         """延迟注入蝴蝶效应系统（用于解决循环依赖：butterfly 在 planner 之后创建）"""
         self.butterfly_effect = butterfly_effect
         logger.debug("BranchPlanner butterfly_effect injected: %s",
                      "yes" if butterfly_effect else "no")
+
+    def set_perception_scope(self, scope):
+        """[v1.2] 延迟注入 PerceptionScope"""
+        self.perception_scope = scope
+        logger.debug("BranchPlanner perception_scope injected: %s",
+                     "yes" if scope else "no")
 
     def plan(self, npc, world_state, max_replans: int = 2) -> PlanResult:
         """
@@ -108,6 +149,19 @@ class BranchPlanner:
             PlanResult，包含 score / attempts / evaluated_branches / pruned_branches
             等搜索元数据；若 ToT 路径异常则回退到原有逻辑（向后兼容）。
         """
+        # [v1.2] 视野隔离硬执行：sleeping 区 NPC 跳过 LLM 规划，直接返回兜底休息
+        # 远离玩家的 NPC 不需要复杂的 ToT 规划，节省 LLM 成本
+        if self.perception_scope:
+            try:
+                if self.perception_scope.should_skip_thinking(npc, world_state):
+                    logger.debug("[BranchPlanner] %s in sleeping zone, skip ToT plan",
+                                 getattr(npc, "name", "?"))
+                    fallback = self._fallback_rest(npc, world_state)
+                    fallback.search_mode = "perception_skip"
+                    return fallback
+            except Exception as e:
+                logger.debug("[BranchPlanner] perception scope check failed: %s", e)
+
         result = PlanResult()
 
         # Step 1: 目标分解为并行分支
@@ -162,7 +216,7 @@ class BranchPlanner:
 
                 if feasible:
                     result.feasible = True
-                    self._plan_cache[npc.agent_id] = result
+                    self._cache_plan(npc, result, world_state)
                     logger.info("ToT 命中分支 npc=%s attempt=%d type=%s score=%.3f",
                                 npc.name, attempt + 1, branch.branch_type, score)
                     return result
@@ -181,7 +235,7 @@ class BranchPlanner:
         fallback.evaluated_branches = result.evaluated_branches
         fallback.pruned_branches = result.pruned_branches
         fallback.attempts = max_attempts
-        self._plan_cache[npc.agent_id] = fallback
+        self._cache_plan(npc, fallback, world_state)
         return fallback
 
     # ── [ToT] 评估与剪枝 ────────────────────────────────────
@@ -284,7 +338,7 @@ class BranchPlanner:
             result.actions = actions
             selected.actions = actions
 
-        self._plan_cache[npc.agent_id] = result
+        self._cache_plan(npc, result, world_state)
         return result
 
     def _evaluate_branch(self, branch: Branch, npc, world_state) -> float:
@@ -577,6 +631,16 @@ class BranchPlanner:
                 if extra:
                     relations_text += "; " + "; ".join(extra)
 
+            # [v1.2] 视野隔离：构造感知摘要
+            perception_brief = "（感知系统未启用）"
+            if self.perception_scope:
+                try:
+                    perception_brief = self.perception_scope.build_perception_brief(
+                        npc, world_state=world_state,
+                    )
+                except Exception as e:
+                    logger.debug("[BranchPlanner] build perception brief failed: %s", e)
+
             prompt = DECOMPOSE_GOAL_PROMPT.format(
                 npc_name=npc.name,
                 npc_age=npc.age,
@@ -592,13 +656,25 @@ class BranchPlanner:
                 reputation=getattr(npc, 'reputation', 0),
                 tags=", ".join(npc.tags[:5]),
                 relations=relations_text,
+                perception_brief=perception_brief,
                 day=world_state.current_day,
                 time=world_state.current_time,
                 season=world_state.season,
                 weather=world_state.weather,
                 crisis_level=world_state.crisis_level,
             )
-            result = self.llm.chat_json(prompt, temperature=0.5, max_tokens=0)
+
+            # [v1.2] 知识边界硬过滤
+            if self.perception_scope:
+                try:
+                    prompt = self.perception_scope.enforce_knowledge_scope(npc, prompt)
+                except Exception:
+                    pass
+
+            result = self.llm.chat_json(
+                prompt, temperature=0.5, max_tokens=0,
+                schema_hint='{"branches":[{"type":"survival|social|career|exploration","objective":"目标描述","priority":0.0-1.0,"sub_tasks":["子任务"]}]}',
+            )
             branches = []
             for b in result.get("branches", []):
                 branches.append(Branch(
@@ -638,7 +714,10 @@ class BranchPlanner:
                 status_effects=", ".join(npc.status_effects[:3]) or "无",
                 branches_text=branches_text,
             )
-            result = self.llm.chat_json(prompt, temperature=0.3, max_tokens=0)
+            result = self.llm.chat_json(
+                prompt, temperature=0.3, max_tokens=0,
+                schema_hint='{"selected_branch":"分支类型","reason":"选择原因","urgency":"high|medium|low"}',
+            )
             selected_type = result.get("selected_branch", "")
             matched = next((b for b in branches if b.branch_type == selected_type), None)
             if matched:
@@ -665,7 +744,10 @@ class BranchPlanner:
                 intelligence=npc.stats.intelligence,
                 location=resolve_location_name(npc.current_location or "未知", world_state),  # [Bug] location code → display name
             )
-            result = self.llm.chat_json(prompt, temperature=0.6, max_tokens=0)
+            result = self.llm.chat_json(
+                prompt, temperature=0.6, max_tokens=0,
+                schema_hint='{"actions":[{"type":"work|rest|social|travel|explore|trade|study|craft","target":"目标","detail":"描述","est_duration":"时长","energy_cost":0-100,"priority":0.0-1.0}],"fallback":"备用行动类型"}',
+            )
             return result.get("actions", [{"type": "rest", "detail": "无行动", "energy_cost": 0}])
         except Exception as e:
             logger.warning("行动序列生成失败: %s", e)
@@ -721,7 +803,10 @@ class BranchPlanner:
                 inventory=", ".join([f"{i.name}x{i.quantity}" for i in getattr(npc, 'inventory', [])]) or "空",
                 actions_text="\n".join([f"{i}. {a}" for i, a in enumerate(actions)]),
             )
-            result = self.llm.chat_json(prompt, temperature=0.3, max_tokens=0)
+            result = self.llm.chat_json(
+                prompt, temperature=0.3, max_tokens=0,
+                schema_hint='{"feasible":true|false,"issues":[{"action_index":0,"issue":"问题描述","severity":"critical|warning|suggestion","fix":"修复建议"}],"adjusted_actions":[]}',
+            )
             adjusted = result.get("adjusted_actions", [])
             return result.get("feasible", False), result.get("issues", issues), adjusted
         except Exception as e:
@@ -755,3 +840,171 @@ class BranchPlanner:
     def get_cached_plan(self, agent_id: str) -> PlanResult | None:
         """获取缓存的最近一次规划结果"""
         return self._plan_cache.get(agent_id)
+
+    # ── [v1.6] 思维树可视化 + 异步预规划 ────────────────────────
+
+    def _record_plan_history(self, agent_id: str, npc_name: str,
+                              plan: PlanResult, day: int):
+        """记录规划历史（供前端思维树面板展示）。"""
+        entry = {
+            "agent_id": agent_id,
+            "npc_name": npc_name,
+            "day": day,
+            "timestamp": __import__("time").time(),
+            "plan": plan.to_dict(),
+        }
+        self._plan_history.append(entry)
+        if len(self._plan_history) > self._plan_history_limit:
+            self._plan_history = self._plan_history[-self._plan_history_limit:]
+
+    def _cache_plan(self, npc, plan: PlanResult, world_state):
+        """写入缓存 + 记录历史（同步 plan() 路径复用）。"""
+        self._plan_cache[npc.agent_id] = plan
+        self._record_plan_history(
+            npc.agent_id, npc.name, plan, world_state.current_day
+        )
+
+    def get_recent_plans(self, limit: int = 10) -> list[dict]:
+        """获取最近的规划历史记录（供 API 暴露）。"""
+        limit = max(1, min(50, int(limit)))
+        return list(reversed(self._plan_history[-limit:]))
+
+    def get_npc_plan(self, agent_id: str) -> dict | None:
+        """获取指定 NPC 的缓存规划（供 API 暴露）。"""
+        plan = self._plan_cache.get(agent_id)
+        if not plan:
+            return None
+        return plan.to_dict()
+
+    def get_thought_tree(self, agent_id: str) -> dict:
+        """获取指定 NPC 的思维树数据（cytoscape elements 格式）。
+
+        返回：
+            {
+                "npc_id": agent_id,
+                "elements": {
+                    "nodes": [{"data": {"id", "label", "color", "size", "type", "score"}}],
+                    "edges": [{"data": {"source", "target", "label"}}],
+                },
+                "plan": plan_dict | None,
+            }
+        """
+        plan = self._plan_cache.get(agent_id)
+        if not plan:
+            return {"npc_id": agent_id, "elements": {"nodes": [], "edges": []}, "plan": None}
+
+        nodes = []
+        edges = []
+
+        # 根节点：NPC
+        root_id = "root"
+        nodes.append({
+            "data": {
+                "id": root_id,
+                "label": "规划",
+                "color": "#d4af37",
+                "size": 40,
+                "type": "root",
+                "score": 1.0,
+            }
+        })
+
+        # 分支节点
+        for i, branch in enumerate(plan.all_branches):
+            bid = f"branch_{i}"
+            is_selected = (plan.selected_branch and
+                           plan.selected_branch.branch_type == branch.branch_type and
+                           plan.selected_branch.objective == branch.objective)
+            color = "#5a9a5a" if is_selected else ("#c94545" if branch.score < self.prune_threshold else "#4a8bc9")
+            nodes.append({
+                "data": {
+                    "id": bid,
+                    "label": branch.branch_type,
+                    "color": color,
+                    "size": 25 + branch.score * 20,
+                    "type": "branch",
+                    "score": round(branch.score, 3),
+                    "objective": branch.objective,
+                }
+            })
+            edges.append({"data": {"source": root_id, "target": bid, "label": f"{branch.score:.2f}"}})
+
+            # 行动节点（仅展示选中分支的行动）
+            if is_selected:
+                for j, action in enumerate(branch.actions[:4]):
+                    aid = f"{bid}_action_{j}"
+                    action_label = action.get("detail", action.get("type", ""))[:20]
+                    nodes.append({
+                        "data": {
+                            "id": aid,
+                            "label": action_label,
+                            "color": "#8a7d6b",
+                            "size": 18,
+                            "type": "action",
+                            "score": 0.0,
+                        }
+                    })
+                    edges.append({"data": {"source": bid, "target": aid, "label": ""}})
+
+        # 剪枝节点
+        for i, pruned in enumerate(plan.pruned_branches):
+            pid = f"pruned_{i}"
+            nodes.append({
+                "data": {
+                    "id": pid,
+                    "label": "剪枝",
+                    "color": "#555",
+                    "size": 15,
+                    "type": "pruned",
+                    "score": 0.0,
+                    "objective": pruned,
+                }
+            })
+            edges.append({"data": {"source": root_id, "target": pid, "label": "剪枝"}})
+
+        return {
+            "npc_id": agent_id,
+            "elements": {"nodes": nodes, "edges": edges},
+            "plan": plan.to_dict(),
+        }
+
+    async def preplan_async(self, npc, world_state) -> dict:
+        """[v1.6] 异步预规划单个 NPC（通过 task_queue 调用）。
+
+        在后台线程中执行 plan()，结果存入 _plan_cache 供后续检索。
+        """
+        import asyncio
+        agent_id = npc.agent_id
+        npc_name = npc.name
+        day = world_state.current_day
+        try:
+            plan = await asyncio.to_thread(self.plan, npc, world_state)
+            if plan:
+                self._plan_cache[agent_id] = plan
+                self._record_plan_history(agent_id, npc_name, plan, day)
+                return {"agent_id": agent_id, "status": "ok", "score": plan.score}
+            return {"agent_id": agent_id, "status": "empty"}
+        except Exception as e:
+            logger.warning("[BranchPlanner] preplan_async failed for %s: %s", npc_name, e)
+            return {"agent_id": agent_id, "status": "error", "error": str(e)}
+
+    async def batch_preplan_async(self, npcs: list, world_state) -> list[dict]:
+        """[v1.6] 批量异步预规划多个 NPC。
+
+        并发执行（最多 3 个同时），避免单个 NPC 阻塞。
+        """
+        import asyncio
+        if not npcs:
+            return []
+        # 限制并发数，避免 LLM 限流
+        semaphore = asyncio.Semaphore(3)
+
+        async def _run(npc):
+            async with semaphore:
+                return await self.preplan_async(npc, world_state)
+
+        tasks = [_run(npc) for npc in npcs[:10]]  # 最多 10 个 NPC
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return [r if not isinstance(r, Exception) else {"status": "error", "error": str(r)}
+                for r in results]
+

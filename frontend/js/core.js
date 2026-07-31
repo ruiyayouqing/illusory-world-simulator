@@ -81,15 +81,25 @@ var wsOnToken = null;   // function(token) — 收到流式 token 时回调
 var wsOnResult = null;  // function(result, state) — 收到完整结果时回调
 var wsOnThinking = null; // function() — AI 开始思考时回调
 var wsOnStreamEnd = null; // function() — 流结束时回调
+var wsOnNpcChatToken = null;  // function(token) — 收到 NPC 聊天流式 token 时回调
+var wsOnNpcChatEnd = null;    // function() — NPC 聊天流结束时回调
 // [v10] 有限重连 + 指数退避，避免无限重连（M5c）
 var wsReconnectAttempts = 0;
 var wsMaxReconnect = 10;
 var wsIntentionalClose = false;
 
-function connectWS() {
+async function connectWS() {
   if (ws && ws.readyState === WebSocket.OPEN) return;
+  // [Bug] 连接前必须确保 access_token 已就绪，否则后端 WS 鉴权会以 4001 关闭连接，
+  // 导致"WebSocket 未连接"且无法与 NPC 聊天。ensureToken 内部有缓存，重复调用无开销。
+  await ensureToken();
   var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   var wsUrl = protocol + '//' + location.host + '/ws/' + wsClientId;
+  // [Bug] 后端 websocket_endpoint 校验 token（若已设置 access_token），
+  // 前端必须把 token 作为 query 参数传入，否则连接被 4001 关闭。
+  if (window.ACCESS_TOKEN) {
+    wsUrl += '?token=' + encodeURIComponent(window.ACCESS_TOKEN);
+  }
   try {
     ws = new WebSocket(wsUrl);
     ws.onopen = function() {
@@ -107,6 +117,12 @@ function connectWS() {
           wsOnThinking();
         } else if (msg.type === 'result' && wsOnResult) {
           wsOnResult(msg.result, msg.state);
+        } else if (msg.type === 'npc_chat_result' && window.handleNpcChatResult) {
+          window.handleNpcChatResult(msg.result);
+        } else if (msg.type === 'npc_chat_token' && wsOnNpcChatToken) {
+          wsOnNpcChatToken(msg.token);
+        } else if (msg.type === 'npc_chat_end' && wsOnNpcChatEnd) {
+          wsOnNpcChatEnd();
         } else if (msg.type === 'pong') {
           // keepalive
         }

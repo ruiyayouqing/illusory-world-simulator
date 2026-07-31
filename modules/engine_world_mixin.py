@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 from .level_system import LevelSystem, GodsCodex
 
-logger = logging.getLogger("chronoverse")
+logger = logging.getLogger("chronoverse.engine")
 
 
 class WorldGenMixin:

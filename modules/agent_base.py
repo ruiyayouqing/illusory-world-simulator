@@ -32,10 +32,25 @@ class BaseAgent(ABC):
         self._last_context_debug: dict = {}
         # [v10+] 混合检索器（可选注入，用于 BM25 + 向量 + GraphRAG 融合检索）
         self.hybrid_retriever = None
+        # [v1.6 P1-5] CRAG + HyDE 检索管道（可选注入，优先于 hybrid_retriever）
+        self.crag_hyde_pipeline = None
 
     def set_hybrid_retriever(self, hybrid_retriever):
         """注入混合检索器。"""
         self.hybrid_retriever = hybrid_retriever
+
+    def set_crag_hyde_pipeline(self, pipeline):
+        """[v1.6 P1-5] 注入 CRAG + HyDE 检索管道。"""
+        self.crag_hyde_pipeline = pipeline
+
+    # [v1.6 P1-8] 情感记忆管理器引用（可选注入）
+    # 由 GameEngine._init_services 注入，使 PlayerAgent/NPCAgent 在决策时
+    # 通过 get_player_emotion_hint / get_npc_emotion_hint 注入情感状态
+    emotional_memory_manager = None
+
+    def set_emotional_memory_manager(self, mgr):
+        """[v1.6 P1-8] 注入情感记忆管理器。"""
+        self.emotional_memory_manager = mgr
 
     # ── 抽象接口 ──────────────────────────────────────────
 
@@ -186,14 +201,32 @@ class BaseAgent(ABC):
         [v10] 使用带重要性+时间衰减的排序检索。
         [v10+] 优先使用混合检索（BM25 + 向量 + GraphRAG），失败回退到纯向量检索。
         [v10+] scene_type: 叙事场景类型，用于动态调整检索权重（GraphRAG 动态启停）。
+        [v1.6 P1-5] 优先使用 CRAG+HyDE 管道（含相关性自评估和查询重写）。
         """
         if not self.memory:
             return ""
         parts = []
 
-        # [v10+] 优先使用混合检索（如果已注入）
+        # [v1.6 P1-5] 优先使用 CRAG+HyDE 管道（如果已注入）
         narratives = None
-        if self.hybrid_retriever is not None:
+        if self.crag_hyde_pipeline is not None:
+            try:
+                # 提取世界背景用于 HyDE
+                world_ctx = ""
+                if self.lorebook and hasattr(self.lorebook, "world_name"):
+                    world_ctx = getattr(self.lorebook, "world_description", "") or ""
+                narratives = self.crag_hyde_pipeline.retrieve(
+                    player_input, top_k=5, world_context=world_ctx,
+                    current_turn=current_turn, scene_type=scene_type,
+                )
+                if narratives:
+                    logger.debug("CRAG+HyDE pipeline returned %d results", len(narratives))
+            except Exception as e:
+                logger.warning("CRAG+HyDE pipeline failed, falling back to hybrid: %s", e)
+                narratives = None
+
+        # 回退：[v10+] 使用混合检索
+        if not narratives and self.hybrid_retriever is not None:
             try:
                 narratives = self.hybrid_retriever.retrieve(
                     player_input, top_k=5, current_turn=current_turn,

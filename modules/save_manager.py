@@ -13,6 +13,8 @@ from .schemas import (
 from .db.sqlite_db import WorldDB
 from .db.chroma_db import MemoryStore
 from .data.safe_io import load_json_safe, atomic_write_json  # [Bug] 存档损坏恢复
+# [v1.4 P2-9] 存档版本迁移框架（注册表 + 链式迁移 + 备份）
+from .save_migration import migrate_save, CURRENT_VERSION as _LATEST_SAVE_VERSION
 
 
 class SaveSlot:
@@ -45,7 +47,8 @@ class TimelineManager:
 
     def create_slot(self, name: str, meta: SaveMeta, world_state: WorldState,
                     player_state: PlayerState, npc_states: dict[str, NPCState],
-                    description: str = "", narrative_history: list[dict] = None) -> str:
+                    description: str = "", narrative_history: list[dict] = None,
+                    image_history: list[dict] = None) -> str:
         slot_id = f"slot_{uuid.uuid4().hex[:8]}"
         slot_dir = self.slots_dir / slot_id
         slot_dir.mkdir(parents=True)
@@ -57,6 +60,8 @@ class TimelineManager:
             "npc_states": {k: v.model_dump() for k, v in npc_states.items()},
             # [Bug] 必须把 narrative_history 一起写入 slot，否则加载 slot 后历史记录会丢失
             "narrative_history": list(narrative_history) if narrative_history else [],
+            # [v1.3] 把 image_history 一起写入 slot，加载 slot 后历史图片才能完整呈现（如看小说）
+            "image_history": list(image_history) if image_history else [],
         }
         from .data.safe_io import atomic_write_json
         atomic_write_json(slot_dir / "state.json", state_data)
@@ -145,7 +150,7 @@ class TimelineManager:
 logger = logging.getLogger("chronoverse")
 
 
-SAVE_VERSION = "0.2.0"  # 当前存档格式版本
+SAVE_VERSION = _LATEST_SAVE_VERSION  # [v1.4 P2-9] 当前存档格式版本（来自 save_migration 模块）
 
 
 class SaveManager:
@@ -337,7 +342,7 @@ class SaveManager:
 
     def save_state(self, world_id: str, meta: SaveMeta, world_state: WorldState,
                    player_state: PlayerState, npc_states: dict[str, NPCState],
-                   event_log: list[dict] = None, narrative: dict = None,
+                   event_log: list[dict] = None,
                    save_type: str = "auto"):
         world_dir = self.base_dir / world_id
         if not world_dir.exists():
@@ -369,10 +374,9 @@ class SaveManager:
             for event in event_log:
                 db.log_event(event)
 
-        if narrative:
-            chapter_num = len(list((world_dir / "narrative").glob("chapter_*.json"))) + 1
-            chapter_file = world_dir / "narrative" / f"chapter_{chapter_num:03d}.json"
-            self._write_json(chapter_file, narrative)
+        # [v1.4 P1-7] 删除废弃的 narrative 参数死代码
+        # （章节生成由 game_engine.generate_novel_chapter 用时间戳命名直接写入，
+        #  此处的 chapter_NNN.json 分支从未被任何调用方触发）
 
         manifest = self._read_json(world_dir / "manifest.json")
         manifest["last_saved_at"] = meta.save_timestamp
@@ -396,11 +400,12 @@ class SaveManager:
         if not world_dir.exists():
             raise FileNotFoundError(f"存档 {world_id} 不存在")
 
-        # 版本迁移检查
+        # [v1.4 P2-9] 版本迁移检查：调用 save_migration 框架（链式迁移 + 备份）
         manifest = self._read_json(world_dir / "manifest.json")
         saved_version = manifest.get("version", "0.1.0")
         if saved_version != SAVE_VERSION:
-            logger.info(f"存档 {world_id} 版本 {saved_version} → {SAVE_VERSION}，执行迁移...")
+            logger.info("存档 %s 版本 %s → %s，执行迁移...",
+                        world_id, saved_version, SAVE_VERSION)
             self._migrate_save(world_id, saved_version, world_dir)
 
         meta = SaveMeta(**self._read_json(world_dir / "state" / "meta.json"))
@@ -473,6 +478,14 @@ class SaveManager:
                            capture_output=True, timeout=10)
         if world_dir.exists():
             shutil.rmtree(str(world_dir), ignore_errors=True)
+        # [v1.3] 清理该世界的独立图片文件夹 static/images/wst/{world_id}/
+        try:
+            wst_dir = self.base_dir.parent / "static" / "images" / "wst" / world_id
+            if wst_dir.exists():
+                shutil.rmtree(str(wst_dir), ignore_errors=True)
+                logger.info("Cleaned image dir for world %s", world_id)
+        except Exception as e:
+            logger.warning("Failed to clean image dir for %s: %s", world_id, e)
         self.index.get("saves", {}).pop(world_id, None)
         self._save_index()
         return True
@@ -489,41 +502,16 @@ class SaveManager:
         return True
 
     def _migrate_save(self, world_id: str, from_version: str, world_dir: Path):
-        """存档版本迁移：从旧版本升级到新版本"""
-        migrations = []
+        """[v1.4 P2-9] 存档版本迁移 — 委托给 save_migration 框架
 
-        # 0.1.0 → 0.2.0: 更新 manifest version，NPC schema 增加了 role/role_history/relation_history
-        if from_version <= "0.1.0":
-            migrations.append("0.1.0→0.2.0: NPC schema 升级 (增加身份追踪字段)")
-
-            # 给现有NPC补充初始role
-            npcs_dir = world_dir / "state" / "npcs"
-            if npcs_dir.exists():
-                for npc_file in npcs_dir.glob("*.json"):
-                    npc_data = self._read_json(npc_file)
-                    if npc_data and not npc_data.get("role"):
-                        # 从 tags 推断
-                        for tag in npc_data.get("tags", []):
-                            if tag not in ["善良", "豪爽", "谨慎", "勇敢", "胆小",
-                                          "聪明", "憨厚", "普通人", "穿越者"]:
-                                npc_data["role"] = tag
-                                break
-                        if not npc_data.get("role"):
-                            npc_data["role"] = ""
-                        npc_data.setdefault("role_history", [])
-                        npc_data.setdefault("relation_history", [])
-                        self._write_json(npc_file, npc_data)
-
-            # 更新 manifest 版本号
-            manifest_path = world_dir / "manifest.json"
-            manifest = self._read_json(manifest_path)
-            manifest["version"] = SAVE_VERSION
-            self._write_json(manifest_path, manifest)
-
-        # 未来版本迁移在此继续添加...
-
-        for m in migrations:
-            logger.info(f"  ✅ {m}")
+        新框架特性：
+          - 注册表模式：新迁移在 save_migration.py 用 @register 装饰器添加
+          - 链式迁移：0.1.0→0.2.0→0.3.0 自动按顺序执行
+          - 自动备份：迁移前复制 world_dir 到 backups/pre_migrate_*_{timestamp}/
+          - 失败停止：单步失败抛 RuntimeError，manifest.version 保持上一步值
+          - 版本比较：用元组 (0,2,0) 而非字符串，避免 "0.10.0" < "0.2.0" 陷阱
+        """
+        migrate_save(world_id, from_version, world_dir, self, target_version=SAVE_VERSION)
 
     def close_all(self):
         for db in self._dbs.values():

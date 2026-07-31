@@ -34,29 +34,26 @@ class NovelImporter:
         从小说文本自动提取角色/世界观/地理/关系。
         
         Args:
-            text: 小说文本（建议 2000-10000 字）
+            text: 小说文本
             world_type: 世界类型，"auto" 时自动推断
             
         Returns:
             完整的世界创建数据，可直接传给 GameEngine.generate_world_from_description
         """
-        # 截取前 8000 字以控制 token 消耗
-        excerpt = text[:8000]
-
         # Step 1: 提取角色
-        characters = self._extract_characters(excerpt)
+        characters = self._extract_characters(text)
         logger.info("提取到 %d 个角色", len(characters))
 
         # Step 2: 提取世界观
-        world_info = self._extract_world(excerpt, world_type)
+        world_info = self._extract_world(text, world_type)
         logger.info("世界类型: %s, 名称: %s", world_info.get("world_type"), world_info.get("world_name"))
 
         # Step 3: 提取地点
-        locations = self._extract_locations(excerpt)
+        locations = self._extract_locations(text)
         logger.info("提取到 %d 个地点", len(locations))
 
         # Step 4: 提取关系
-        relations = self._extract_relations(excerpt, characters)
+        relations = self._extract_relations(text, characters)
         logger.info("提取到 %d 条关系", len(relations))
 
         # Step 5: 构建完整的世界数据

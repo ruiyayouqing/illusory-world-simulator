@@ -89,6 +89,15 @@ async def search_narrative(q: str = ""):
     if not q:
         return {"results": []}
     try:
+        # [v1.4 P1-7] 优先从 HistoryDB 读取（每世界独立），MetaDB 作回退
+        from .deps import BASE_DIR
+        from modules.state_history import StateHistoryManager
+        history_db = BASE_DIR / "saves" / engine.current_world_id / "history.db"
+        if history_db.exists():
+            shm = StateHistoryManager(str(history_db))
+            results = shm.search_narrative(engine.current_world_id, q)
+            return {"results": results}
+        # 回退：MetaDB（旧数据兼容）
         db = get_meta_db()
         results = db.search_narrative(engine.current_world_id, q)
         return {"results": results}
@@ -103,6 +112,14 @@ async def narrative_stats():
     if not engine or not engine.current_world_id:
         return {"error": "游戏未初始化"}
     try:
+        # [v1.4 P1-7] 优先从 HistoryDB 读取，MetaDB 作回退
+        from .deps import BASE_DIR
+        from modules.state_history import StateHistoryManager
+        history_db = BASE_DIR / "saves" / engine.current_world_id / "history.db"
+        if history_db.exists():
+            shm = StateHistoryManager(str(history_db))
+            return {"stats": shm.get_stats(engine.current_world_id)}
+        # 回退：MetaDB（旧数据兼容）
         db = get_meta_db()
         return {"stats": db.get_stats(engine.current_world_id)}
     except Exception as e:

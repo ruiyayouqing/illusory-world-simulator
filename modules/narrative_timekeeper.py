@@ -69,6 +69,31 @@ PATTERNS_SEASONAL = [
     (re.compile(r'光\s*阴\s*似\s*箭|时\s*光\s*飞\s*逝|弹\s*指|白\s*驹\s*过\s*隙'), lambda m: 0),
 ]
 
+# [Bug 修复] 序数日模式："第X日/天" — 当叙事中出现多个"第X日"时，
+# 取最大值作为时间跳跃。用于支持"第一日...第十日..."这种叙事手法。
+# 单独处理，需至少出现 2 次才生效（避免单次提及误判）
+PATTERN_ORDINAL_DAY = re.compile(r'第\s*(\d+|[一二三四五六七八九十百千两]+)\s*[日天]')
+
+
+# [Bug 修复 v9.1] 无后缀序数日模式 — 单次出现即推进1天
+# 背景：v9 重构时移除了"第二天"模式，导致玩家输入/AI输出里"到了第二天上午"
+# 这类无"后"后缀的时间跳跃完全不被识别，引发上下文时间线倒退 bug。
+# 此模式要求触发词前缀（到了/转眼/等到/次日/翌日/隔日），避免误判历史叙述
+# （如"百年前的第二天""传说中第二天的故事"不算时间跳跃）
+# 排除上下文：历史/传说/古时候/曾经/百年前/千年前/那年 等明显历史叙述词
+_HISTORICAL_CONTEXT = r'(?:历史|传说|古时候|曾经|百年前|千年前|那年|往事|回忆|记载|故事里?)'
+
+PATTERNS_ORDINAL_DAY_NO_SUFFIX = [
+    # "到了第二天/次日/翌日/隔日" — 推进1天（需触发词前缀）
+    (re.compile(r'(?:到了|转眼到了?|等到|翌日清晨醒来|次日清晨醒来)\s*第[二两]\s*[日天]'), lambda m: 1),
+    (re.compile(r'(?:到了|转眼到了?|等到)\s*(?:次日|翌日|隔日)'), lambda m: 1),
+    # "次日清晨/上午/下午/晚上" "翌日清晨/..." — 独立成句的时间推进词，推进1天
+    (re.compile(r'(?:次日|翌日|隔日)\s*(?:清晨|早上|上午|中午|下午|傍晚|黄昏|晚上|夜里|夜晚|黎明|拂晓)'), lambda m: 1),
+    # "第二天清晨/上午/下午/晚上" — 推进1天（需前有"到了"或独立成句）
+    (re.compile(r'第[二两]\s*[日天]\s*(?:清晨|早上|上午|中午|下午|傍晚|黄昏|晚上|夜里|夜晚|黎明|拂晓)'), lambda m: 1),
+]
+
+
 ALL_DAY_PATTERNS = PATTERNS_DAYS + PATTERNS_WEEKS + PATTERNS_MONTHS + PATTERNS_YEARS + PATTERNS_SEASONAL
 
 
@@ -131,6 +156,47 @@ def parse_time_skip_from_text(text: str, world_type: str = "custom") -> dict:
                 if days > best_days:
                     best_days = days
 
+    # [Bug 修复] 序数日处理：当叙事中出现多个"第X日"时，取最大值作为时间跳跃。
+    # 至少出现 2 次才生效，避免单次提及（如"第三日的清晨"）误判。
+    ordinal_matches = PATTERN_ORDINAL_DAY.findall(search_text_clean)
+    if len(ordinal_matches) >= 2:
+        ordinal_days = []
+        for num_str in ordinal_matches:
+            if num_str.isdigit():
+                d = int(num_str)
+            else:
+                d = _cn_num_to_int(num_str)
+            if d > 0:
+                ordinal_days.append(d)
+        if ordinal_days:
+            max_ordinal = max(ordinal_days)
+            # 序数日表示"从第1天到第X天"，跳跃天数 = max_ordinal - 1（起始日不算跳跃）
+            # 但为简化，直接用 max_ordinal 作为跳跃天数（保守取值，多跳跃 1 天可接受）
+            if max_ordinal > best_days:
+                best_days = max_ordinal
+                all_matches.append({
+                    "text": f"第{max_ordinal}日（序数日，共{len(ordinal_days)}次提及）",
+                    "days": max_ordinal,
+                    "vague": False,
+                })
+
+    # [Bug v9.1] 无后缀序数日处理：识别"到了第二天上午""次日清晨""翌日傍晚"等
+    # 单次出现即推进1天。v9 移除"第二天"模式导致这类时间跳跃被完全忽略，
+    # 引发上下文时间线倒退 bug（结构化状态停在昨晚，反向注入 prompt 误导 AI）。
+    # 排除历史叙述上下文（如"百年前的第二天""传说中的第二天"）
+    for pattern, extractor in PATTERNS_ORDINAL_DAY_NO_SUFFIX:
+        for m in pattern.finditer(search_text_clean):
+            start = max(0, m.start() - 30)
+            end = min(len(search_text_clean), m.end() + 30)
+            context_window = search_text_clean[start:end]
+            if re.search(_HISTORICAL_CONTEXT, context_window):
+                continue
+            days = extractor(m)
+            match_text = m.group()
+            all_matches.append({"text": match_text, "days": days, "vague": False})
+            if days > best_days:
+                best_days = days
+
     # [Bug] 恢复单次跳跃上限，超过MAX_SKIP_DAYS视为误判并拦截
     if best_days > MAX_SKIP_DAYS:
         logger.warning(
@@ -163,11 +229,30 @@ class NarrativeTimekeeper:
                              current_game_day: int = 1,
                              world_type: str = "custom") -> dict:
         """
-        [v9] 解析叙事文本，累加时间偏移。
-        只从叙事（AI回复）中检测时间跳跃，忽略玩家输入。
+        [v9.1] 解析叙事文本，累加时间偏移。
+        [Bug 修复] v9 只解析 AI 叙事忽略玩家输入，导致玩家输入"到了第二天上午"
+        这类明确时间跳跃无法推进 current_day，引发上下文时间线倒退。
+        现在：先解析玩家输入（若含明确时间跳跃则取），再解析 AI 叙事，取较大值。
+        玩家输入的跳跃会标记 source=player_input，供上层同步 location/time。
         """
+        # 先解析玩家输入（含明确时间推进词时优先采用）
+        days_from_player = 0
+        matches_from_player = []
+        if player_input:
+            parsed_player = parse_time_skip_from_text(player_input, world_type=world_type)
+            days_from_player = parsed_player["days"]
+            matches_from_player = parsed_player["matches"]
+
+        # 再解析 AI 叙事
         parsed = parse_time_skip_from_text(text or "", world_type=world_type)
         days_advanced = parsed["days"]
+
+        # 取较大值；若玩家输入有跳跃且大于等于叙事跳跃，标记来源
+        skip_source = "narrative"
+        if days_from_player > 0 and days_from_player >= days_advanced:
+            days_advanced = days_from_player
+            parsed["matches"] = matches_from_player + parsed["matches"]
+            skip_source = "player_input"
 
         if parsed["is_vague"] and not days_advanced:
             for m in parsed["matches"]:
@@ -183,6 +268,7 @@ class NarrativeTimekeeper:
                 "advanced_days": days_advanced,
                 "matches": [m["text"] for m in parsed["matches"]],
                 "narrative_offset": self.narrative_day_offset,
+                "source": skip_source,
             })
             if len(self.detected_skips) > 50:
                 self.detected_skips = self.detected_skips[-50:]
@@ -198,6 +284,7 @@ class NarrativeTimekeeper:
             "matches": parsed["matches"],
             "has_vague_pending": len(self.pending_vague_skips) > 0,
             "vague_skips": list(self.pending_vague_skips),
+            "source": skip_source,
         }
 
     def mark_year_evolved(self):

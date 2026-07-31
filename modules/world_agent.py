@@ -3,6 +3,7 @@ import json
 from .schemas import WorldState, MacroEvent, LocationDef, PlayerState, NPCState
 from .llm.base_llm import BaseLLM
 from .db.sqlite_db import WorldDB
+from .prompt_utils import sanitize_player_input  # [v1.4 P2-10] Prompt injection 防护
 from .prompt.world_prompts import (
     EVENT_GENERATION_PROMPT, EVENT_PROPAGATION_PROMPT,
     SCENE_ACTORS_PROMPT, ENVIRONMENT_RESPONSE_PROMPT,
@@ -110,8 +111,10 @@ class WorldAgent:
         loc_name = location_def.location_name if location_def else player.location
         objects = ", ".join(location_def.special_actions) if location_def else "无"
 
+        # [v1.4 P2-10] Prompt injection 防护
+        safe_action = sanitize_player_input(player_action)
         prompt = ENVIRONMENT_RESPONSE_PROMPT.format(
-            player_action=player_action,
+            player_action=safe_action,
             location=loc_name,
             time=time,
             weather=weather,
@@ -129,7 +132,8 @@ class WorldAgent:
             f"- [{e.get('event_type', '')}] {e.get('description', '')}"
             for e in today_events
         ]) or "无事件"
-        actions_text = "\n".join([f"- {a}" for a in player_actions]) or "无行动"
+        # [v1.4 P2-10] Prompt injection 防护：每个玩家行动单独 sanitize
+        actions_text = "\n".join([f"- {sanitize_player_input(a, max_len=200)}" for a in player_actions]) or "无行动"
 
         prompt = DAILY_WORLD_SUMMARY_PROMPT.format(
             today_events=events_text,

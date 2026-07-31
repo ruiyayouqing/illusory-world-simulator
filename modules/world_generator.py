@@ -3,6 +3,7 @@ import json
 import uuid
 import random
 from .llm.base_llm import BaseLLM
+from .prompt_utils import sanitize_player_input  # [v1.4 P2-10] Prompt injection 防护
 
 
 WORLD_TYPE_TEMPLATES = {
@@ -240,6 +241,8 @@ class WorldGenerator:
 
     def generate_npc_dialogue(self, npc_data: dict, context: str,
                               player_action: str = "") -> dict:
+        # [v1.4 P2-10] Prompt injection 防护
+        safe_action = sanitize_player_input(player_action) if player_action else ""
         prompt = f"""你是NPC对话AI。根据NPC性格和当前情境生成对话。
 
 【NPC信息】
@@ -252,7 +255,7 @@ class WorldGenerator:
 【当前情境】
 {context}
 
-{"【玩家行为】" + player_action if player_action else ""}
+{"【玩家行为】" + safe_action if safe_action else ""}
 
 【输出JSON格式】
 {{

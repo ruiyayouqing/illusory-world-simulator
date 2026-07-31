@@ -7,9 +7,12 @@ import json
 import logging
 from fastapi import WebSocket, WebSocketDisconnect, Query
 
-from .deps import get_engine, active_connections, ws_lock, access_token
+from .deps import get_engine, active_connections, ws_lock
+# [Bug P3-E] access_token 用动态访问（deps.access_token），避免 import-time 绑定
+# 导致 server.py 启动时设置的 token 不生效（字符串是不可变类型，import 后是独立副本）
+from . import deps as _deps
 
-logger = logging.getLogger("chronoverse")
+logger = logging.getLogger("chronoverse.routes")
 
 HEARTBEAT_INTERVAL = 30  # 秒
 
@@ -17,7 +20,9 @@ HEARTBEAT_INTERVAL = 30  # 秒
 async def websocket_endpoint(websocket: WebSocket, client_id: str,
                               token: str = Query("")):
     # [v11] WebSocket 鉴权：验证 token（如果设置了 access_token）
-    if access_token and token != access_token:
+    # [Bug P3-E] 动态读取 deps.access_token（server.py 启动时设置）
+    _access_token = _deps.access_token
+    if _access_token and token != _access_token:
         await websocket.close(code=4001, reason="Unauthorized")
         return
 

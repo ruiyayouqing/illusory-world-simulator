@@ -46,7 +46,7 @@ document.addEventListener('alpine:init', () => {
       ui: { theme: 'obsidian', font_size: 'medium', strip_gray_narrative: true },
       npc_info_visibility: 'immersive',
       fixed_prompt: { content: '', enabled: true },
-      game: { narrative_style: '章回体', narrative_perspective: 'second', economy_enabled: false }
+      game: { narrative_style: '真人作者', narrative_perspective: 'third', economy_enabled: false, action_validation_enabled: true }
     },
     llmProfiles: [],
     imageProfiles: [],
@@ -90,8 +90,9 @@ document.addEventListener('alpine:init', () => {
         '半古半文': '文言句式与白话叙事交融，类似《明朝那些事儿》或《琅琊榜》的风格。句式简练有力，偶用典故，但不晦涩。',
         '大白话': '现代口语化叙事，轻松幽默，像朋友在讲故事。短句为主，偶尔吐槽，贴近当代网文读者的阅读习惯。',
         '严肃文学': '冷峻克制的文学风格，类似余华、莫言。注重细节描写和心理刻画，语言凝练，情感内敛。',
-        '网文爽文': '快节奏网文风格，爽点密集，系统提示频繁。数据化呈现，升级打怪。语言直白有力，每段都有钩子。',
-        '诗化散文': '意境优先的散文风格，类似迟子建的作品。注重景物描写和氛围营造，语言优美，富有诗意。'
+        '网文爽文': '快节奏网文风格，爽点密集，奇遇连连。主角光环明显，升级打怪，装逼打脸。语言直白有力，每段都有钩子。',
+        '诗化散文': '意境优先的散文风格，类似《额尔古纳右岸》或迟子建的作品。注重景物描写和氛围营造，语言优美，富有诗意。节奏缓慢，适合沉浸式体验。',
+        '真人作者': '不要堆砌华丽辞藻，叙事以「说清楚事」为第一要务。对话占比高、信息密度大、承担推进剧情/传递世界观/塑造人物三重功能。大量内心独白展开思维过程。第三人称全知视角，多视角自由切换制造信息差。配角有目标与动机，非工具人。长句为主，多重从句嵌套。幽默为结构性节奏工具。'
       }
       this.styleDescription = styles[this.config.game?.narrative_style] || ''
     },

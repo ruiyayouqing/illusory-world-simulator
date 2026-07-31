@@ -6,17 +6,34 @@ from .prompt_utils import resolve_location_name  # [Bug] location code → displ
 
 
 class DeathSystem:
+    # [Bug 修复] 不死不灭标签关键词：玩家 tags 含这些词时跳过寿命死亡判定
+    # 防止"创世神""不死不灭"等设定角色被寿终正寝误杀
+    IMMORTAL_TAGS = {"不死", "不灭", "永生", "不朽", "长生", "创世神", "永恒"}
+
     def __init__(self, llm: BaseLLM):
         self.llm = llm
         self.death_count: int = 0
         self.death_history: list[dict] = []
         self.reincarnation_data: dict | None = None
 
+    def _is_immortal(self, player: PlayerState) -> bool:
+        """[Bug 修复] 判断玩家是否为不死之身（tags 含不死/不灭/永生等关键词）"""
+        tags = getattr(player, 'tags', []) or []
+        for tag in tags:
+            for kw in self.IMMORTAL_TAGS:
+                if kw in str(tag):
+                    return True
+        return False
+
     def check_death(self, player: PlayerState, world_state: WorldState) -> dict | None:
         if player.stats.health <= 0:
             return self._generate_death(player, world_state, "重伤不治")
         if player.stats.energy <= 0 and player.stats.health < 20:
             return self._generate_death(player, world_state, "体力耗竭，倒地不起")
+
+        # [Bug 修复] 不死不灭角色跳过寿命死亡判定
+        if self._is_immortal(player):
+            return None
 
         max_age = getattr(player, 'max_age', 80)
         old_age_threshold = max_age - 10

@@ -1,17 +1,18 @@
 function showGame(skipNpcSpawn) {
   $('home').style.display = 'none';
+  var _p = ['createWorldPage','loadSavePage','novelRoleplayPage'];
+  _p.forEach(function(id){var el=document.getElementById(id); if(el) el.style.display='none';});
   $('game').style.display = 'grid';
   if (GS && GS.world_id) window._currentWorldId = GS.world_id;
   updateMapPreview();
   connectWS();
-  // [Bug] 根据当前主题选择对应的渐变背景，而非始终使用深色 'royal'
+  // [Bug] 进入主游戏页面后，任何模式下都不显示随机背景和轮换
+  //       统一使用主题底色方案（与周边UI一致的渐变背景）
+  BGManager.stopSubpageBgRotation();
   var currentTheme = '';
-  try { currentTheme = document.documentElement.style.getPropertyValue('--theme') || ''; } catch(e) {}
-  // 通过读取 CSS 变量 --bg 判断是否浅色主题
-  var bgColor = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
-  var isLightTheme = bgColor && parseInt(bgColor.replace('#','').slice(0,2), 16) > 128;
-  var gradType = isLightTheme ? ('theme-' + (window._currentWorldName || 'ivory')) : 'royal';
-  BGManager.setGradientBg(gradType, true);
+  try { currentTheme = document.documentElement.style.getPropertyValue('--theme') || 'obsidian'; } catch(e) {}
+  if (!currentTheme) currentTheme = 'obsidian';
+  BGManager.setGradientBg('theme-' + currentTheme, false);
   // [v10+++] 进入游戏后，后台异步补充重要 NPC（加载存档时跳过）
   if (!skipNpcSpawn) triggerAsyncNpcSpawn();
 }
@@ -33,6 +34,32 @@ function triggerAsyncNpcSpawn() {
 
 function sanitizeHTML(text) {
   return escHtml(text);
+}
+
+// [v1.2] 高亮系统提示文本（金手指/网文风格生成的"系统提示：..."、"【任务难度：...】"等）
+// 在 sanitizeHTML 之后调用，对转义后的 &quot; 和 【】 做匹配
+// rawText 可选：传入 parseDialogue 处理后的原始文本，用于判断"整段是否为系统提示"
+function highlightSystemHints(html, rawText) {
+  if (!html) return html;
+  var t = (rawText || '').trim();
+  // 整段判断：以"系统提示"/"任务难度"开头，或整段是【系统提示：...】，或纯好感度数据
+  var isWholeHint = false;
+  if (/^系统提示/.test(t)) isWholeHint = true;
+  else if (/^任务难度/.test(t)) isWholeHint = true;
+  else if (/^【[^】]*?(?:系统提示|任务难度|危机等级|战力评估|建议组队|建议战力|任务目标|主线任务|支线任务)[^】]*?】/.test(t)) isWholeHint = true;
+  else if (/好感度[+\-−]\d+/.test(t) && t.length < 120 && !/[。！？].{15,}/.test(t)) isWholeHint = true;
+  else if (/危机等级\d+\s*\/\s*\d+/.test(t) && t.length < 80) isWholeHint = true;
+
+  if (isWholeHint) {
+    return '<span class="sys-hint">' + html + '</span>';
+  }
+  // 片段替换：处理正文中夹带的"系统提示：..."和【系统提示：...】
+  var kw = '(?:系统提示|任务难度|危机等级|战力评估|建议组队|建议战力|任务目标|主线任务|支线任务|当前等级|经验值|金币|好感度[^&]*?[+\\-−]\\d+)';
+  var quoteRe = new RegExp('&quot;([^&]*?' + kw + '[^&]*?)&quot;', 'g');
+  var bracketRe = new RegExp('【([^】]*?' + kw + '[^】]*?)】', 'g');
+  return html
+    .replace(quoteRe, '<span class="sys-hint">&quot;$1&quot;</span>')
+    .replace(bracketRe, '<span class="sys-hint">【$1】</span>');
 }
 
 function parseDialogue(text) {
@@ -95,17 +122,14 @@ function addNarrative(text, isEvent, isPlayerInput) {
       if (oldBtn) oldBtn.remove();
       _lastNarrativeWrapper = null;
     }
-    // [v11] 移除上一个玩家输入的删除按钮
-    if (_lastPlayerInputDiv) {
-      var oldDelBtn = _lastPlayerInputDiv.querySelector('.undo-btn');
-      if (oldDelBtn) oldDelBtn.remove();
-    }
+    // [v11.1] 不再移除上一个玩家输入的撤销按钮，保留所有历史撤销按钮，
+    // 支持多步撤销（点击任意历史玩家输入的撤销按钮可撤销到该位置）
   }
 
   if (isEvent) {
     const p = document.createElement('p');
     p.className = 'event';
-    p.innerHTML = sanitizeHTML(text).replace(/\n/g, '<br>');
+    p.innerHTML = highlightSystemHints(sanitizeHTML(text).replace(/\n/g, '<br>'), text);
     c.appendChild(p);
   } else if (isPlayerInput) {
     const div = document.createElement('div');
@@ -140,7 +164,7 @@ function addNarrative(text, isEvent, isPlayerInput) {
           wrapper.className = 'ai-narrative-wrapper';
           const p = document.createElement('p');
           p.className = 'ai-narrative';
-          p.innerHTML = sanitizeHTML(part.text).replace(/\n/g, '<br>');
+          p.innerHTML = highlightSystemHints(sanitizeHTML(part.text).replace(/\n/g, '<br>'), part.text);
           wrapper.appendChild(p);
           // [Bug] 只在最后一个AI叙事上添加重试按钮
           if (_lastNarrativeWrapper) {
@@ -164,28 +188,72 @@ function addNarrative(text, isEvent, isPlayerInput) {
 }
 
 // [v11] 撤销最后一次行动：删除玩家输入及随后的AI叙事
-function undoLastAction(playerInputDiv) {
+// [v11.1] 支持多步撤销：点击任意历史玩家输入的撤销按钮，
+// 会撤销从该位置到最新玩家输入之间的所有行动（含 AI 回复和事件）
+async function undoLastAction(playerInputDiv) {
   if (!playerInputDiv || !playerInputDiv.parentNode) return;
-  if (!confirm('确定要撤销本次行动和AI回复吗？')) return;
+
+  // 统计从当前点击的玩家输入到最新玩家输入之间有多少步（用于后端 steps 参数）
   var nb = $('nb');
   var children = Array.from(nb.children);
+  var clickIdx = children.indexOf(playerInputDiv);
+  if (clickIdx < 0) return;
+
+  // 计算需要撤销的步数：从点击位置之后到最后一个 player-input 之间
+  // 的 player-input 数量（含点击位置本身）
+  var steps = 0;
+  for (var i = clickIdx; i < children.length; i++) {
+    if (children[i].classList && children[i].classList.contains('player-input')) {
+      steps++;
+    }
+  }
+  if (steps <= 0) steps = 1;  // 安全兜底
+
+  var confirmMsg = steps === 1
+    ? '确定要撤销本次行动和AI回复吗？'
+    : '确定要撤销最近 ' + steps + ' 次行动（含AI回复）吗？\n\n此操作将从点击的位置开始，撤销其后所有行动。';
+  if (!confirm(confirmMsg)) return;
+
+  // 调用后端API撤销游戏状态中的历史记录（传 steps 参数）
+  try {
+    var res = await api('POST', '/api/undo?steps=' + steps);
+    if (!res || !res.success) {
+      alert(res && res.error ? res.error : '撤销失败');
+      return;
+    }
+  } catch (e) {
+    alert('撤销失败：网络错误');
+    return;
+  }
+
+  // 后端撤销成功后，移除前端DOM：从点击位置之后的所有节点（含点击位置）
+  children = Array.from(nb.children);  // 重新获取，避免上方的 children 失效
   var startIdx = children.indexOf(playerInputDiv);
   if (startIdx < 0) return;
-  var endIdx = children.length;
-  for (var i = startIdx + 1; i < children.length; i++) {
-    if (children[i].classList && children[i].classList.contains('player-input')) {
-      endIdx = i;
+  // 移除从 startIdx 开始到末尾的所有节点
+  for (var j = children.length - 1; j >= startIdx; j--) {
+    if (children[j].parentNode) children[j].remove();
+  }
+
+  // 重置"最后玩家输入"指针到撤销后最新的 player-input（如果还有的话）
+  _lastPlayerInputDiv = null;
+  _lastNarrativeWrapper = null;
+  var remainingChildren = Array.from(nb.children);
+  for (var k = remainingChildren.length - 1; k >= 0; k--) {
+    if (remainingChildren[k].classList && remainingChildren[k].classList.contains('player-input')) {
+      _lastPlayerInputDiv = remainingChildren[k];
       break;
     }
   }
-  for (var j = endIdx - 1; j >= startIdx; j--) {
-    if (children[j].parentNode) children[j].remove();
+  // 更新 _lastPlayerInput 为最新剩余的玩家输入（若无则清空）
+  if (_lastPlayerInputDiv) {
+    _lastPlayerInput = _lastPlayerInputDiv.textContent.replace(/^你的行动/, '').trim();
+  } else {
+    _lastPlayerInput = '';
   }
-  _lastPlayerInputDiv = null;
-  _lastPlayerInput = '';
-  _lastNarrativeWrapper = null;
+  // 更新 outputLog：移除最后 steps 条记录
   if (typeof outputLog !== 'undefined' && outputLog.length > 0) {
-    outputLog.pop();
+    outputLog.splice(Math.max(0, outputLog.length - steps));
   }
   $('ot').textContent = '选择你的行动：';
   clearOpts();
@@ -269,6 +337,32 @@ function restoreHistory(history, images) {
         narrative: h.text || '',
         options: [],
       });
+    } else if (h.type === 'autorun') {
+      // [v1.2 Bug修复] 加载存档时恢复自主运行生成的章节内容
+      // 章节分隔符 + 章节文本（按段落渲染，与 startAutoRun 中的推送逻辑一致）
+      if (typeof addChapterDivider === 'function') addChapterDivider('📖');
+      var chapterText = h.text || '';
+      // 章节文本通常以"【自主运行 · 第X天~第Y天】"开头，加上元信息提示
+      var metaInfo = '';
+      if (h.days_advanced) {
+        metaInfo = '⏩ 世界自主运行 ' + h.days_advanced + ' 天';
+        if (h.events_count !== undefined) metaInfo += ' · ' + h.events_count + ' 个事件';
+        if (h.interactions_count !== undefined) metaInfo += ' · ' + h.interactions_count + ' 次代演对话';
+        addSystem(metaInfo);
+      }
+      // 章节内容按段落渲染（addNarrative 会做 sanitizeHTML + 系统提示高亮）
+      var paragraphs = chapterText.split(/\n{2,}/);
+      paragraphs.forEach(function(p) {
+        p = p.trim();
+        if (p) addNarrative(p);
+      });
+      if (typeof addChapterDivider === 'function') addChapterDivider('✦');
+      outputLog.push({
+        time: h.day ? '第' + h.day + '天' : '',
+        input: '[自主运行章节]',
+        narrative: chapterText,
+        options: [],
+      });
     } else if (h.type === 'summary') {
       var summaryText = '【历史摘要】第' + (h.day_range ? h.day_range[0] + '-' + h.day_range[1] : '?') + '天\n' + h.text;
       addNarrative(summaryText, true);
@@ -350,8 +444,10 @@ function updateStatus() {
     var seasonIcon = {'春季':'🌸','夏季':'☀️','秋季':'🍂','冬季':'❄️'};
     var timeIcon = {'清晨':'🌅','上午':'☀️','中午':'🌤️','下午':'⛅','傍晚':'🌇','深夜':'🌙','夜晚':'🌙'};
     var icon = (seasonIcon[ts.season] || '') + ' ' + (timeIcon[ts.time_of_day] || '');
-    tsBar.innerHTML = '📅 ' + escHtml(ts.display) + ' | ' + icon + ' ' + escHtml(ts.season) + '·' + escHtml(ts.time_of_day) + ' | ' + escHtml(ts.weather);
-    tsBar.title = '故事已过' + ts.total_days + '天（其中AI识别时间跳跃' + (ts.narrative_offset || 0) + '天）';
+    // [Bug 修复] 屏蔽游戏天数显示（时间计算易出错，已屏蔽时间跳跃功能）
+    // 只保留时段/季节/天气，移除天数和"故事已过X天"提示
+    tsBar.innerHTML = icon + ' ' + escHtml(ts.season) + '·' + escHtml(ts.time_of_day) + ' | ' + escHtml(ts.weather);
+    tsBar.title = '';
   }
   var drEl = $('div_rate');
   var dr = GS.divergence_rate || 0;

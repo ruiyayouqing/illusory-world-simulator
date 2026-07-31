@@ -33,6 +33,11 @@ class StateSnapshot:
     narrative_text: str = ""
     player_input: str = ""
     diff_summary: str = ""  # 与上一个快照的差异摘要
+    # [v12] 分支管理字段
+    branch_id: str = "main"               # 分支ID（主线/平行世界）
+    parent_snapshot_id: int | None = None  # 父快照（分支起点）
+    divergence_point: bool = False         # 是否是分歧点
+    is_active: bool = True                 # 是否属于当前活跃分支
 
 
 class StateHistoryManager:
@@ -60,7 +65,11 @@ class StateHistoryManager:
                 npc_states TEXT,
                 narrative_text TEXT,
                 player_input TEXT,
-                diff_summary TEXT
+                diff_summary TEXT,
+                branch_id TEXT DEFAULT 'main',
+                parent_snapshot_id INTEGER,
+                divergence_point INTEGER DEFAULT 0,
+                is_active INTEGER DEFAULT 1
             )
         """)
 
@@ -77,7 +86,8 @@ class StateHistoryManager:
                 narrative TEXT,
                 image_url TEXT,
                 options TEXT,
-                metadata TEXT
+                metadata TEXT,
+                branch_id TEXT DEFAULT 'main'
             )
         """)
 
@@ -91,14 +101,23 @@ class StateHistoryManager:
             ON narrative_history(world_id, turn)
         """)
 
+        # [v12] 分支索引
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_snapshots_branch
+            ON state_snapshots(world_id, branch_id, turn)
+        """)
+
         conn.commit()
         conn.close()
 
     def save_snapshot(self, world_id: str, turn: int, day: int, time: str,
                      player_state, world_state, npc_states: dict,
                      narrative: str = "", player_input: str = "",
-                     diff_summary: str = ""):
-        """保存一个状态快照"""
+                     diff_summary: str = "",
+                     branch_id: str = "main",
+                     parent_snapshot_id: int = None,
+                     divergence_point: bool = False):
+        """保存一个状态快照（[v12] 支持分支）"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
@@ -112,8 +131,9 @@ class StateHistoryManager:
         cursor.execute("""
             INSERT INTO state_snapshots
             (world_id, turn, day, time, timestamp, player_state, world_state,
-             npc_states, narrative_text, player_input, diff_summary)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             npc_states, narrative_text, player_input, diff_summary,
+             branch_id, parent_snapshot_id, divergence_point, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             world_id, turn, day, time,
             datetime.now().isoformat(),
@@ -121,6 +141,8 @@ class StateHistoryManager:
             json.dumps(world_dict, ensure_ascii=False),
             json.dumps(npc_dict, ensure_ascii=False),
             narrative, player_input, diff_summary,
+            branch_id, parent_snapshot_id,
+            1 if divergence_point else 0, 1,
         ))
 
         conn.commit()
@@ -263,6 +285,51 @@ class StateHistoryManager:
                 parts.append(f"[图片] {entry['image_url']}")
         return "\n\n".join(parts)
 
+    # [v1.4 P1-7] 统一 narrative 持久化：新增 search/stats 方法，
+    # 让搜索/统计接口可从 HistoryDB 读取，取代 MetaDB.narrative 冗余表
+
+    def search_narrative(self, world_id: str, keyword: str, limit: int = 20) -> list[dict]:
+        """[v1.4] 关键词搜索叙事历史（替代 MetaDB.narrative.search_narrative）"""
+        # 转义 LIKE 通配符
+        escaped = keyword.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT entry_type, day, time, narrative, player_input FROM narrative_history "
+            "WHERE world_id=? AND narrative LIKE ? ESCAPE '\\' "
+            "ORDER BY day DESC LIMIT ?",
+            (world_id, f"%{escaped}%", limit)
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [
+            {
+                "type": r[0], "day": r[1], "time": r[2],
+                "text": r[3] or "", "player_input": r[4] or "",
+            }
+            for r in rows
+        ]
+
+    def get_stats(self, world_id: str) -> dict:
+        """[v1.4] 叙事统计（替代 MetaDB.narrative.get_stats）"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM narrative_history WHERE world_id=?", (world_id,)
+        )
+        total = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT MAX(day) FROM narrative_history WHERE world_id=?", (world_id,)
+        )
+        max_day = cursor.fetchone()[0] or 0
+        cursor.execute(
+            "SELECT COUNT(*) FROM narrative_history WHERE world_id=? AND entry_type='narrative'",
+            (world_id,)
+        )
+        narratives = cursor.fetchone()[0]
+        conn.close()
+        return {"total_entries": total, "max_day": max_day, "narrative_count": narratives}
+
     def compute_diff(self, old_snapshot: StateSnapshot,
                     new_snapshot: StateSnapshot) -> str:
         """计算两个快照之间的差异"""
@@ -346,7 +413,13 @@ class StateHistoryManager:
         return "\n".join(report)
 
     def _row_to_snapshot(self, row) -> StateSnapshot:
-        """将数据库行转换为StateSnapshot"""
+        """将数据库行转换为StateSnapshot（[v12] 含分支字段）"""
+        # 向后兼容：旧数据可能没有分支字段
+        branch_id = row[12] if len(row) > 12 and row[12] else "main"
+        parent_id = row[13] if len(row) > 13 else None
+        div_point = bool(row[14]) if len(row) > 14 else False
+        is_active = bool(row[15]) if len(row) > 15 else True
+
         return StateSnapshot(
             snapshot_id=row[0],
             world_id=row[1],
@@ -360,4 +433,139 @@ class StateHistoryManager:
             narrative_text=row[9] or "",
             player_input=row[10] or "",
             diff_summary=row[11] or "",
+            branch_id=branch_id,
+            parent_snapshot_id=parent_id,
+            divergence_point=div_point,
+            is_active=is_active,
         )
+
+    # ── [v12] 分支管理（Letta式Git版本控制） ────────────────
+
+    def create_branch(self, world_id: str, from_snapshot_id: int,
+                      branch_name: str) -> str:
+        """
+        [v12] 从某个快照创建新分支（平行世界）。
+        玩家选不同时间轴进入 = 创建新分支。
+
+        返回：新分支ID
+        """
+        branch_id = f"branch_{branch_name}_{int(datetime.now().timestamp())}"
+
+        # 获取父快照
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM state_snapshots WHERE id = ?",
+            (from_snapshot_id,)
+        )
+        parent_row = cursor.fetchone()
+        conn.close()
+
+        if not parent_row:
+            logger.warning("create_branch: 父快照 %d 不存在", from_snapshot_id)
+            return "main"
+
+        # 标记父快照为分歧点
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE state_snapshots SET divergence_point = 1 WHERE id = ?",
+            (from_snapshot_id,)
+        )
+        conn.commit()
+        conn.close()
+
+        logger.info("创建分支: %s (从快照 %d)", branch_id, from_snapshot_id)
+        return branch_id
+
+    def get_active_branch(self, world_id: str) -> str:
+        """[v12] 获取当前活跃分支"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT branch_id FROM state_snapshots
+            WHERE world_id = ? AND is_active = 1
+            ORDER BY turn DESC LIMIT 1
+        """, (world_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else "main"
+
+    def get_branches(self, world_id: str) -> list[dict]:
+        """[v12] 获取所有分支列表"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT branch_id, MIN(turn) as start_turn,
+                   MAX(turn) as end_turn, COUNT(*) as snapshot_count
+            FROM state_snapshots
+            WHERE world_id = ?
+            GROUP BY branch_id
+            ORDER BY start_turn
+        """, (world_id,))
+        rows = cursor.fetchall()
+        conn.close()
+        return [
+            {
+                "branch_id": r[0],
+                "start_turn": r[1],
+                "end_turn": r[2],
+                "snapshot_count": r[3],
+            }
+            for r in rows
+        ]
+
+    def rollback_to(self, world_id: str, snapshot_id: int):
+        """
+        [v12] 回滚到某个快照（Letta式Git回滚）。
+        该快照之后的所有快照标记为 inactive。
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # 获取目标快照的 turn
+        cursor.execute(
+            "SELECT turn FROM state_snapshots WHERE id = ?",
+            (snapshot_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return
+
+        target_turn = row[0]
+
+        # 标记之后的快照为 inactive
+        cursor.execute("""
+            UPDATE state_snapshots
+            SET is_active = 0
+            WHERE world_id = ? AND turn > ?
+        """, (world_id, target_turn))
+
+        conn.commit()
+        conn.close()
+        logger.info("回滚: %s 到快照 %d (turn %d)",
+                    world_id, snapshot_id, target_turn)
+
+    def get_divergence_points(self, world_id: str) -> list[dict]:
+        """[v12] 获取所有分歧点（可供玩家选择的时间节点）"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, turn, day, narrative_text, branch_id
+            FROM state_snapshots
+            WHERE world_id = ? AND divergence_point = 1
+            ORDER BY turn ASC
+        """, (world_id,))
+        rows = cursor.fetchall()
+        conn.close()
+        return [
+            {
+                "snapshot_id": r[0],
+                "turn": r[1],
+                "day": r[2],
+                "narrative": r[3] or "",
+                "branch_id": r[4],
+            }
+            for r in rows
+        ]

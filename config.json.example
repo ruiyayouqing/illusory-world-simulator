@@ -1,27 +1,59 @@
 {
+  "_comment": "太虚幻境 配置模板 — 复制为 config.json 并填入你的 API key（明文，首次启动会自动加密为 enc: 前缀）。切勿提交真实 config.json 到版本库。",
+
   "llm": {
-    "api_key": "",
-    "base_url": "https://api.deepseek.com",
+    "api_key": "YOUR_MAIN_LLM_API_KEY",
+    "base_url": "https://api.deepseek.com/v1",
     "model_name": "deepseek-v4-flash",
     "temperature": 0.8,
-    "max_tokens": 0
+    "max_tokens": 0,
+    "_comment_pricing": "价格表单位 USD/1K tokens。基于 2026 年公开信息估算，请按实际账单调整。未列出的模型成本估算为 0。",
+    "pricing": {
+      "deepseek-v4-flash": {"input_per_1k": 0.00014, "output_per_1k": 0.00056},
+      "deepseek-ai/DeepSeek-V4-Flash": {"input_per_1k": 0.00017, "output_per_1k": 0.00068},
+      "deepseek-v4-pro": {"input_per_1k": 0.0014, "output_per_1k": 0.0056}
+    }
+  },
+  "llm_budget": {
+    "enabled": true,
+    "_comment_budget": "daily_budget_usd=0 表示不限制；建议设为 1.0-5.0（约 7-35 元）防止失控",
+    "daily_budget_usd": 2.0,
+    "per_turn_limit": 8,
+    "per_turn_window_sec": 30.0,
+    "circuit_failure_threshold": 5,
+    "circuit_recovery_sec": 30.0
+  },
+  "features": {
+    "npc_private_facts": {
+      "enabled": false,
+      "max_facts_per_npc": 5,
+      "trigger": "first_contact"
+    },
+    "npc_personality_evolution": {
+      "enabled": true,
+      "check_interval_turns": 5
+    },
+    "causal_graph": {
+      "enabled": true,
+      "min_importance_to_record": 6.0
+    }
   },
   "cheap_llm": {
-    "api_key": "",
-    "base_url": "https://api.siliconflow.cn/v1",
-    "model_name": "deepseek-ai/DeepSeek-V4-Flash",
-    "enabled": false
+    "api_key": "YOUR_CHEAP_LLM_API_KEY",
+    "base_url": "https://api.deepseek.com",
+    "model_name": "deepseek-v4-flash",
+    "enabled": true
   },
   "image": {
-    "api_key": "",
-    "base_url": "",
-    "model_name": "",
+    "api_key": "YOUR_IMAGE_API_KEY",
+    "base_url": "https://api.siliconflow.cn/v1/images/generations",
+    "model_name": "Kwai-Kolors/Kolors",
     "image_size": "1024x576",
     "auto_generate": false
   },
   "embedding": {
-    "api_key": "",
-    "base_url": "",
+    "api_key": "YOUR_EMBEDDING_API_KEY",
+    "base_url": "https://api.siliconflow.cn/v1/embeddings",
     "model_name": "BAAI/bge-m3"
   },
   "llm_profiles": {},
@@ -32,13 +64,16 @@
     "auto_save": true,
     "max_short_term_memory": 20,
     "npc_offline_evolution": true,
-    "narrative_style": "大白话",
+    "narrative_style": "网文爽文",
     "narrative_style_custom": "",
     "narrative_perspective": "third",
     "economy_enabled": false,
     "narrative_max_chars": 1000,
     "streaming_enabled": true,
-    "action_validation_enabled": false
+    "action_validation_enabled": true
+  },
+  "npc": {
+    "planner_probability": 0.0
   },
   "v10": {
     "narrative_reviewer": {
@@ -120,9 +155,9 @@
   "active_cheap_llm_profile": "",
   "dialogue_llm": {
     "enabled": true,
-    "api_key": "",
-    "base_url": "",
-    "model_name": ""
+    "api_key": "YOUR_DIALOGUE_LLM_API_KEY",
+    "base_url": "https://api.deepseek.com",
+    "model_name": "deepseek-v4-flash"
   },
   "dialogue_llm_profiles": {},
   "active_dialogue_llm_profile": ""

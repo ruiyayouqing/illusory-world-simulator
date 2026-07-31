@@ -15,6 +15,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from .prompt_utils import sanitize_player_input  # [v1.4 P2-10] Prompt injection 防护
+
 logger = logging.getLogger("chronoverse.multi_agent_narrative")
 
 
@@ -40,13 +42,15 @@ class PlotArchitect:
         if not self.llm:
             return ""
 
+        # [v1.4 P2-10] Prompt injection 防护
+        safe_input = sanitize_player_input(player_input)
         prompt = f"""你是情节架构师。请基于以下上下文和玩家输入，生成一段叙事的情节大纲。
 
 【上下文】
 {context}
 
 【玩家输入】
-{player_input}
+{safe_input}
 
 【场景类型】
 {scene_type or "未指定"}
@@ -130,13 +134,15 @@ class DialogueWriter:
         if not self.llm:
             return ""
 
+        # [v1.4 P2-10] Prompt injection 防护
+        safe_input = sanitize_player_input(player_input)
         prompt = f"""你是叙事撰写师。请基于情节大纲和角色备注，撰写完整的叙事文本。
 
 【上下文】
 {context}
 
 【玩家输入】
-{player_input}
+{safe_input}
 
 【情节大纲】
 {outline}

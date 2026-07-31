@@ -11,7 +11,7 @@ from modules.game_engine import GameEngine
 from modules.security import decrypt_config_keys
 from modules.prompt_utils import resolve_location_name  # [Bug] location code → display name
 
-logger = logging.getLogger("chronoverse")
+logger = logging.getLogger("chronoverse.routes")
 router = APIRouter(prefix="/api")
 
 
@@ -23,16 +23,19 @@ def _validate_world_id(world_id: str) -> str:
 
 
 class CreateGameRequest(BaseModel):
-    api_key: str
-    base_url: str = "https://token-plan-cn.xiaomimimo.com/v1"
-    model_name: str = "mimo-V2.5-Pro"
+    # [Bug P3-D-1] 默认值改为空字符串，让 init_llm 回退到 config["llm"]
+    # 前端仍会显式传入解密后的值，不影响现有行为；API-only 客户端可省略
+    api_key: str = ""
+    base_url: str = ""
+    model_name: str = ""
     world_name: str = "大明风华"
 
 
 class LoadGameRequest(BaseModel):
-    api_key: str
-    base_url: str = "https://token-plan-cn.xiaomimimo.com/v1"
-    model_name: str = "mimo-V2.5-Pro"
+    # [Bug P3-D-1] 同 CreateGameRequest
+    api_key: str = ""
+    base_url: str = ""
+    model_name: str = ""
     world_id: str
 
 
@@ -44,9 +47,10 @@ class GenerateWorldRequest(BaseModel):
     description: str
     world_type: str = "custom"
     golden_finger: bool = False  # [v9] 金手指开关
+    # [Bug P3-D-1] 同 CreateGameRequest
     api_key: str = ""
-    base_url: str = "https://token-plan-cn.xiaomimimo.com/v1"
-    model_name: str = "mimo-V2.5-Pro"
+    base_url: str = ""
+    model_name: str = ""
 
 
 class SetGoalRequest(BaseModel):
@@ -85,7 +89,7 @@ def _apply_image_config(eng):
             if img_size and eng.visual_engine:
                 eng.visual_engine.default_image_size = img_size
         except Exception as e:
-            logger.warning("Failed to load image config: %s", e)
+            logger.warning("Failed to load image config: %s", e, exc_info=True)
 
 
 @router.get("/saves")
@@ -114,7 +118,7 @@ async def list_worlds():
             for wid, info in index.get("saves", {}).items():
                 index_worlds[wid] = info
         except Exception as e:
-            logger.warning("Failed to read index.json: %s", e)
+            logger.warning("Failed to read index.json: %s", e, exc_info=True)
     # 2. 从 MetaDB 读取（补充元信息）
     db_worlds = {}
     try:
@@ -122,7 +126,7 @@ async def list_worlds():
         for w in db.list_worlds():
             db_worlds[w.get("world_id", "")] = w
     except Exception as e:
-        logger.warning("MetaDB list_worlds failed: %s", e)
+        logger.warning("MetaDB list_worlds failed: %s", e, exc_info=True)
     # 3. 合并：以 index.json 为主（文件系统真实存在），MetaDB 补充缺失字段
     merged = {}
     for wid, info in index_worlds.items():
@@ -245,7 +249,7 @@ async def load_game(req: LoadGameRequest):
                     scene = f"第{engine.world_state.current_day}天 {engine.world_state.current_time}，你在{resolve_location_name(engine.player_state.location, engine.world_state)}"  # [Bug] location code → display name
                     initial_options = await asyncio.to_thread(engine.option_engine.generate_options, scene, engine.player_state, engine.world_state)
                 except Exception as e:
-                    logger.warning("Failed to generate initial options on load: %s", e)
+                    logger.warning("Failed to generate initial options on load: %s", e, exc_info=True)
                     initial_options = engine.option_engine._fallback_options(engine.player_state)
             # [Bug] 加载存档时恢复世界观简介，否则前端只恢复历史叙事但丢失初始世界观
             world_intro = ""
@@ -296,7 +300,7 @@ async def player_input(req: PlayerInputRequest):
             db = get_meta_db()
             db.update_world_saved(engine.current_world_id)
         except Exception as e:
-            logger.warning("Failed to update world_saved in MetaDB: %s", e)
+            logger.warning("Failed to update world_saved in MetaDB: %s", e, exc_info=True)
         return {"result": result, "state": state}
     except Exception as e:
         logger.error("Player input failed: %s", e, exc_info=True)
@@ -350,7 +354,7 @@ def _generate_bridge_narrative(engine, evt, npc) -> str:
             if bridge and len(bridge) > 20:
                 return bridge
         except Exception as e:
-            logger.warning("Bridge narrative LLM generation failed: %s", e)
+            logger.warning("Bridge narrative LLM generation failed: %s", e, exc_info=True)
 
     # 回退：模板
     mood = "急切" if priority == "urgent" else ("平和" if priority == "important" else "随意")
@@ -454,7 +458,7 @@ async def respond_event(event_id: str, req: EventRespondRequest):
     try:
         engine.save_game("auto")
     except Exception as e:
-        logger.warning("Auto-save after event respond failed: %s", e)
+        logger.warning("Auto-save after event respond failed: %s", e, exc_info=True)
 
     return response
 
@@ -534,25 +538,136 @@ async def get_events_history(category: str = None, event_type: str = None,
 
 
 @router.post("/undo")
-async def undo_last_turn():
-    """[v11] 撤销最后一次玩家行动及AI回复"""
+async def undo_last_turn(steps: int = 1):
+    """[v11] 撤销最后一次玩家行动及AI回复
+
+    [v11.1] 增加 steps 查询参数支持多步连续撤销：
+    - steps=1（默认）：撤销最近一次行动（兼容原行为）
+    - steps=N：连续撤销 N 次玩家行动
+    """
     engine = get_engine()
     if not engine or not engine.player_state:
         raise HTTPException(status_code=503, detail="游戏未初始化")
+    # 限制单次撤销步数，防止误操作清空全部历史
+    steps = max(1, min(int(steps), 100))
     try:
         async with engine._game_lock:
-            undo_result = await asyncio.to_thread(engine.undo_last_turn)
+            undo_result = await asyncio.to_thread(engine.undo_last_turn, steps)
             state = engine.get_game_state() if undo_result.get("success") else None
         if undo_result.get("success"):
-            logger.info("Undo successful: removed %d entries", undo_result.get("removed", 0))
+            logger.info("Undo successful: removed %d entries (%d turns)",
+                        undo_result.get("removed", 0), undo_result.get("undone_turns", 0))
         return {"success": undo_result.get("success", False),
                 "removed": undo_result.get("removed", 0),
                 "remaining": undo_result.get("remaining", 0),
+                "undone_turns": undo_result.get("undone_turns", 0),
                 "error": undo_result.get("error"),
                 "state": state}
     except Exception as e:
         logger.error("Undo failed: %s", e, exc_info=True)
         return {"success": False, "error": f"撤销失败: {e}"}
+
+
+# ========== [v11.1] 世界观微调 ==========
+# 运行时修改 world_state/world_def 的安全字段（不影响存档结构）
+# 可微调字段：world_name, description, weather, season, crisis_level, world_intro
+
+class WorldviewUpdate(BaseModel):
+    """世界观微调请求体"""
+    world_name: str | None = None
+    description: str | None = None
+    weather: str | None = None
+    season: str | None = None
+    crisis_level: int | None = None
+    world_intro: str | None = None
+
+
+@router.get("/worldview")
+async def get_worldview():
+    """[v11.1] 获取当前世界观可微调字段"""
+    engine = get_engine()
+    if not engine or not engine.world_state:
+        raise HTTPException(status_code=503, detail="游戏未初始化")
+    ws = engine.world_state
+    wd = engine.world_def or {}
+    return {
+        "world_name": ws.world_name or "",
+        "description": ws.description or "",
+        "weather": ws.weather or "",
+        "season": ws.season or "",
+        "crisis_level": ws.crisis_level or 0,
+        "world_intro": wd.get("world_intro", ""),
+        "world_type": ws.world_type or "custom",  # 只读，不可改
+    }
+
+
+@router.patch("/worldview")
+async def update_worldview(req: WorldviewUpdate):
+    """[v11.1] 微调世界观安全字段
+
+    修改 world_state（world_name/description/weather/season/crisis_level）会自动持久化，
+    修改 world_def.world_intro 会回写 world_def/world.json。
+    world_type 等结构化字段不可改。
+    """
+    engine = get_engine()
+    if not engine or not engine.world_state:
+        raise HTTPException(status_code=503, detail="游戏未初始化")
+    try:
+        async with engine._game_lock:
+            updated = []
+            ws = engine.world_state
+            wd = engine.world_def or {}
+
+            # world_state 字段（改后 save_game 自动持久化到 world_state.json）
+            if req.world_name is not None and req.world_name.strip():
+                ws.world_name = req.world_name.strip()[:50]
+                updated.append("world_name")
+            if req.description is not None:
+                ws.description = req.description.strip()[:500]
+                updated.append("description")
+            if req.weather is not None and req.weather.strip():
+                ws.weather = req.weather.strip()[:20]
+                updated.append("weather")
+            if req.season is not None and req.season.strip():
+                ws.season = req.season.strip()[:20]
+                updated.append("season")
+            if req.crisis_level is not None:
+                ws.crisis_level = max(0, min(10, int(req.crisis_level)))
+                updated.append("crisis_level")
+
+            # world_def.world_intro（需手动回写 world.json）
+            if req.world_intro is not None:
+                intro = req.world_intro.strip()[:1000]
+                if wd:
+                    wd["world_intro"] = intro
+                    engine.world_def = wd
+                    # 回写 world_def/world.json
+                    world_json_path = engine.save_manager.base_dir / engine.current_world_id / "world_def" / "world.json"
+                    engine.save_manager._write_json(world_json_path, wd)
+                    updated.append("world_intro")
+
+            # 持久化 world_state
+            engine.save_game()
+            state = engine.get_game_state()
+
+        logger.info("Worldview updated: %s", ", ".join(updated) if updated else "no changes")
+        return {
+            "success": True,
+            "updated": updated,
+            "state": state,
+            "worldview": {
+                "world_name": ws.world_name,
+                "description": ws.description,
+                "weather": ws.weather,
+                "season": ws.season,
+                "crisis_level": ws.crisis_level,
+                "world_intro": (engine.world_def or {}).get("world_intro", ""),
+                "world_type": ws.world_type,
+            }
+        }
+    except Exception as e:
+        logger.error("Worldview update failed: %s", e, exc_info=True)
+        return {"success": False, "error": f"世界观更新失败: {e}"}
 
 
 @router.post("/event")
@@ -608,7 +723,7 @@ async def delete_save(world_id: str):
         db = get_meta_db()
         db.delete_world(world_id)
     except Exception as e:
-        logger.warning("Failed to delete from MetaDB: %s", e)
+        logger.warning("Failed to delete from MetaDB: %s", e, exc_info=True)
     from modules.save_manager import SaveManager
     sm = SaveManager(str(BASE_DIR / "saves"))
     ok = sm.delete_save(world_id)
@@ -655,7 +770,7 @@ async def generate_world(req: GenerateWorldRequest):
                     world_def=engine.world_def or {},
                 )
             except Exception as e:
-                logger.warning("Failed to sync world to MetaDB: %s", e)
+                logger.warning("Failed to sync world to MetaDB: %s", e, exc_info=True)
             initial_event = ""
             if engine.world_state and engine.world_state.event_history_summary:
                 initial_event = engine.world_state.event_history_summary
@@ -681,7 +796,7 @@ async def generate_world(req: GenerateWorldRequest):
                     scene = f"第{engine.world_state.current_day}天 {engine.world_state.current_time}，你在{resolve_location_name(engine.player_state.location, engine.world_state)}，刚刚来到这个世界"  # [Bug] location code → display name
                     initial_options = await asyncio.to_thread(engine.option_engine.generate_options, scene, engine.player_state, engine.world_state)
                 except Exception as e:
-                    logger.warning("Failed to generate initial options: %s", e)
+                    logger.warning("Failed to generate initial options: %s", e, exc_info=True)
                     initial_options = engine.option_engine._fallback_options(engine.player_state)
             # [Bug] 将世界简介和初始事件写入 narrative_history，确保加载存档后能看到初始内容
             try:
@@ -701,7 +816,7 @@ async def generate_world(req: GenerateWorldRequest):
                         entry_type="event", narrative=initial_event,
                     )
             except Exception as e:
-                logger.warning("Failed to save initial narrative to history: %s", e)
+                logger.warning("Failed to save initial narrative to history: %s", e, exc_info=True)
             return {"world_id": world_id, "state": state, "initial_event": initial_event, "world_intro": world_intro, "initial_options": initial_options}
         except Exception as e:
             logger.error("Generate world failed: %s", e, exc_info=True)
@@ -776,7 +891,7 @@ async def load_from_slot(req: SlotRequest):
                 scene, engine.player_state, engine.world_state
             )
         except Exception as e:
-            logger.warning("Failed to generate initial options after slot load: %s", e)
+            logger.warning("Failed to generate initial options after slot load: %s", e, exc_info=True)
             initial_options = engine.option_engine._fallback_options(engine.player_state)
     # [Bug] slot 加载后也恢复世界观简介
     world_intro = ""
@@ -833,7 +948,7 @@ async def hundred_book_rewind(req: RewindRequest):
                 scene, engine.player_state, engine.world_state
             )
         except Exception as e:
-            logger.warning("Failed to generate options after rewind: %s", e)
+            logger.warning("Failed to generate options after rewind: %s", e, exc_info=True)
             initial_options = engine.option_engine._fallback_options(engine.player_state)
     result["initial_options"] = initial_options
     return result
@@ -915,13 +1030,13 @@ async def get_narrative_history(world_id: str):
                             entries.append(json.loads(line))
                 return {"entries": entries}
             except Exception as e:
-                logger.warning("Failed to read narrative_history.jsonl: %s", e)
+                logger.warning("Failed to read narrative_history.jsonl: %s", e, exc_info=True)
         if hist_path.exists():
             try:
                 entries = json.loads(hist_path.read_text(encoding="utf-8"))
                 return {"entries": entries}
             except Exception as e:
-                logger.warning("Failed to read narrative_history.json: %s", e)
+                logger.warning("Failed to read narrative_history.json: %s", e, exc_info=True)
         return {"entries": []}
 
     try:
@@ -929,7 +1044,7 @@ async def get_narrative_history(world_id: str):
         entries = history_mgr.get_narrative_history(world_id)
         return {"entries": entries}
     except Exception as e:
-        logger.warning("Failed to load narrative history: %s", e)
+        logger.warning("Failed to load narrative history: %s", e, exc_info=True)
         return {"entries": [], "error": str(e)}
 
 
@@ -976,7 +1091,7 @@ async def generate_worldview(req: GenerateWorldviewRequest):
                         default_max_tokens=max_tokens,
                     )
             except Exception as e:
-                logger.warning("Failed to create temp LLM for worldview: %s", e)
+                logger.warning("Failed to create temp LLM for worldview: %s", e, exc_info=True)
 
     if not llm:
         return {"ok": False, "msg": "请检查模型配置", "worldview": ""}
@@ -1037,7 +1152,7 @@ async def generate_worldview(req: GenerateWorldviewRequest):
         else:
             return {"ok": False, "msg": "生成内容为空，请重试", "worldview": ""}
     except Exception as e:
-        logger.error("Failed to generate worldview: %s", e)
+        logger.error("Failed to generate worldview: %s", e, exc_info=True)
         err_str = str(e)
         if "401" in err_str or "api key" in err_str.lower() or "authentication" in err_str.lower():
             return {"ok": False, "msg": "请检查模型配置", "worldview": ""}

@@ -327,6 +327,44 @@ class NpcLifeEvolution:
                 year_events.append(event)
                 self.evolution_log.append(event)
 
+        # [v1.5 第二期] 处理本年度待执行的传承（NPC 自然死亡触发）
+        try:
+            inheritance_records = self.process_pending_inheritance(npcs, world_state)
+            for rec in inheritance_records:
+                year_events.append({
+                    "type": "inheritance",
+                    "npc_id": rec["deceased_id"],
+                    "npc_name": rec["deceased_name"],
+                    "description": f"{rec['deceased_name']}将衣钵传予{rec['heir_name']}",
+                    "year": current_year,
+                    "inheritance": rec,
+                })
+        except Exception as e:
+            logger.warning("Process pending inheritance failed: %s", e)
+
+        # [v1.2] 长期目标演化：仅跨年时调 LLM 判定是否进入下一阶段
+        try:
+            from .goal_evaluator import get_goal_evaluator
+            evaluator = get_goal_evaluator()
+            for npc_id, npc in npcs.items():
+                if "已故" in (npc.tags or []):
+                    continue
+                if not (npc.ai_behavior or {}).get("long_term_goal"):
+                    continue
+                result = evaluator.evolve_long_term_goal(npc, world_state, year_events)
+                if result.get("evolved"):
+                    year_events.append({
+                        "type": "long_term_evolve",
+                        "npc_id": npc_id,
+                        "npc_name": npc.name,
+                        "description": (f"{npc.name}长期目标从「{result.get('old_long_term_goal', '')}」"
+                                       f"演化为「{result.get('new_long_term_goal', '')}」"),
+                        "year": current_year,
+                        "reason": result.get("reason", ""),
+                    })
+        except Exception as e:
+            logger.warning("Long term goal evolution failed: %s", e)
+
         return year_events
 
     def evolve_single_npc_llm(self, npc: NPCState, player_state,
@@ -470,6 +508,10 @@ class NpcLifeEvolution:
                                        event.get("description", ""),
                                        world_state.current_day)
 
+        # [v1.5 第二期] 婚姻/生育事件写入家族字段（仅在事件类型为 marriage/child_birth/first_child 时）
+        if event["type"] in ("marriage", "first_child", "child_birth"):
+            self._update_family_fields(npc, npc_id, event["type"], world_state)
+
         # 死亡
         if effect.get("is_death"):
             death_day = world_state.current_day
@@ -485,9 +527,117 @@ class NpcLifeEvolution:
             npc.stats.health = 0
             if "已故" not in npc.tags:
                 npc.tags.append("已故")
+            # [v1.5 第二期] 自然死亡时尝试传承（仅 death_illness/death_old_age，不含被杀）
+            self._try_inherit_on_death(npc, npc_id, world_state)
 
     def get_dead_npc_info(self, npc_id: str) -> dict | None:
         return self.dead_npcs.get(npc_id)
+
+    def _update_family_fields(self, npc: NPCState, npc_id: str,
+                               event_type: str, world_state: WorldState) -> None:
+        """[v1.5 第二期] 婚姻/生育事件写入 NPC 的家族字段
+
+        marriage    → 创建/加入家族（以 NPC 自己为族长）
+        first_child → 无额外字段操作（tags 已加"为人父母"）
+        child_birth → 无额外字段操作（children 字段需要外部传入新生儿 NPC id）
+        """
+        try:
+            from .family import get_family_registry
+            registry = get_family_registry()
+
+            if event_type == "marriage":
+                # 创建新家族（以自己为族长），traditions 根据 role 推断
+                traditions = []
+                if "修士" in (npc.tags or []):
+                    traditions = ["修道"]
+                elif "商人" in (npc.tags or []):
+                    traditions = ["尚商"]
+                elif "官员" in (npc.tags or []):
+                    traditions = ["崇文"]
+                elif "武者" in (npc.tags or []):
+                    traditions = ["尚武"]
+                if not npc.family_id:
+                    family_name = npc.name + "家"
+                    fam_id = registry.create_family(
+                        name=family_name,
+                        founding_day=world_state.current_day,
+                        head_npc_id=npc_id,
+                        traditions=traditions,
+                    )
+                    npc.family_id = fam_id
+                else:
+                    # 已有家族，加入自己
+                    registry.add_member(npc.family_id, npc_id)
+        except Exception as e:
+            logger.warning("Update family fields failed for %s: %s", npc_id, e)
+
+    def _try_inherit_on_death(self, npc: NPCState, npc_id: str,
+                               world_state: WorldState) -> None:
+        """[v1.5 第二期] NPC 自然死亡时尝试传承
+
+        前置条件：
+          - NPC 通过 death_illness/death_old_age 死亡（自然死亡）
+          - 不在 dead_npcs 中的 NPC 才能作为继承人
+          - 被玩家杀死的不经过此方法（death_system 处理玩家死亡，NPC 被杀另有逻辑）
+        """
+        try:
+            from .family import get_inheritance_service, get_family_registry
+            service = get_inheritance_service()
+
+            # 收集所有已死亡的 NPC id（dead_npcs 字典的 key）
+            dead_ids = set(self.dead_npcs.keys())
+            # 需要访问全部 NPC 字典：从 world_state 反查（_apply_event 没有 npcs 入参）
+            # 由于此方法被 _apply_event 调用，无法直接获取 npcs 字典，
+            # 我们改为延迟到 evolve_year 末尾统一处理（见 evolve_year 末尾钩子）
+            # 这里仅记录待传承的 deceased npc_id
+            if not hasattr(self, "_pending_inheritance"):
+                self._pending_inheritance = []
+            self._pending_inheritance.append({
+                "npc_id": npc_id,
+                "day": world_state.current_day,
+            })
+        except Exception as e:
+            logger.warning("Inheritance scheduling failed for %s: %s", npc_id, e)
+
+    def process_pending_inheritance(self, npcs: dict[str, NPCState],
+                                     world_state: WorldState) -> list[dict]:
+        """[v1.5 第二期] 处理待执行的传承（在 evolve_year 末尾调用）
+
+        Returns:
+            传承记录列表
+        """
+        if not getattr(self, "_pending_inheritance", None):
+            return []
+
+        try:
+            from .family import get_inheritance_service, get_family_registry
+            service = get_inheritance_service()
+            registry = get_family_registry()
+        except Exception as e:
+            logger.warning("Family module unavailable: %s", e)
+            self._pending_inheritance = []
+            return []
+
+        records = []
+        dead_ids = set(self.dead_npcs.keys())
+        for pending in self._pending_inheritance:
+            npc_id = pending["npc_id"]
+            deceased = npcs.get(npc_id)
+            if not deceased:
+                continue
+            record = service.try_inherit_on_natural_death(
+                deceased=deceased,
+                all_npcs=npcs,
+                world_state=world_state,
+                dead_npcs=dead_ids,
+            )
+            if record:
+                records.append(record)
+            # 无论是否找到继承人，都从家族注册表中移除（已故）
+            registry.remove_member(npc_id)
+
+        self._pending_inheritance = []
+        return records
 
     def get_evolution_summary(self, npc_id: str) -> list[dict]:
         return [e for e in self.evolution_log if e.get("npc_id") == npc_id]

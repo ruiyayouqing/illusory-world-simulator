@@ -12,10 +12,12 @@ from .schemas import PlayerState, WorldState, NPCState
 from .llm.base_llm import BaseLLM
 from .narrative_style import NarrativeStyleManager
 from .context_budget import estimate_tokens
+from .prompt_utils import sanitize_player_input  # [v1.4 P2-10] Prompt injection 防护
 from .prompt.narrative_prompts import (
     DAILY_CHAPTER_PROMPT, SCENE_NARRATIVE_PROMPT,
     DYNAMIC_OPTIONS_PROMPT, REACTION_NARRATIVE_PROMPT,
     MORNING_INTRO_PROMPT, DAILY_NOVEL_CHAPTER_PROMPT,
+    AUTORUN_NOVEL_CHAPTER_PROMPT,
     WORLD_EVOLUTION_SUMMARY_PROMPT,
 )
 
@@ -158,9 +160,11 @@ class NarrativeEngine:
     def generate_reaction(self, player_action: str, action_result: str,
                           location: str, time: str,
                           world_style: str = "") -> str:
+        # [v1.4 P2-10] Prompt injection 防护
+        safe_action = sanitize_player_input(player_action)
         prompt = REACTION_NARRATIVE_PROMPT.format(
             style_instruction=self._get_style_instruction(world_style),
-            player_action=player_action,
+            player_action=safe_action,
             action_result=action_result,
             location=location,
             time=time,
@@ -187,7 +191,10 @@ class NarrativeEngine:
     def generate_novel_chapter(self, player: PlayerState, world_state: WorldState,
                                full_log: str, age_info: str = "",
                                economy_info: str = "", butterfly_info: str = "",
-                               world_style: str = "") -> str:
+                               world_style: str = "",
+                               max_tokens: int = 1500,
+                               log_budget: int = 3000,
+                               days_span: int = 1) -> str:
         relations_text = ", ".join([
             f"{k}(好感{v.favor})" for k, v in player.relations.items()
         ]) or "无"
@@ -199,34 +206,66 @@ class NarrativeEngine:
         )
 
         # [v10++] 压缩过长的当日事件日志，避免挤占叙事 token 预算
-        full_log = self._compress_full_log(full_log, max_tokens=3000)
+        # [v1.2] auto-run 多日汇总时放大日志预算，保留更多事件细节
+        full_log = self._compress_full_log(full_log, max_tokens=log_budget)
 
-        prompt = DAILY_NOVEL_CHAPTER_PROMPT.format(
-            style_instruction=self._get_style_instruction(world_style),
-            full_log=full_log,
-            player_name=player.name,
-            player_age=player.age,
-            player_position=player.social.position,
-            location=self._location_display(player, world_state),
-            tags=", ".join(player.tags),
-            strength=player.stats.strength,
-            agility=player.stats.agility,
-            intelligence=player.stats.intelligence,
-            luck=player.stats.luck,
-            health=player.stats.health,
-            max_health=player.stats.max_health,
-            energy=player.stats.energy,
-            max_energy=player.stats.max_energy,
-            gold=player.social.gold,
-            reputation=player.social.reputation,
-            status_effects=", ".join(player.status_effects) if player.status_effects else "正常",
-            relations=relations_text,
-            world_context=world_context,
-            age_info=age_info or "无年龄变化",
-            economy_info=economy_info or "无经济变化",
-            butterfly_info=butterfly_info or "你的行为尚未在世界上留下深刻印记。",
-        )
-        return self.llm.chat(prompt, temperature=0.9, max_tokens=1500)
+        # [v1.2] 多日汇总时使用跨日章节 prompt，避免"第X天...第Y天..."流水账
+        is_multi_day = days_span > 1
+        if is_multi_day:
+            prompt_template = AUTORUN_NOVEL_CHAPTER_PROMPT
+            prompt = prompt_template.format(
+                style_instruction=self._get_style_instruction(world_style),
+                full_log=full_log,
+                player_name=player.name,
+                player_age=player.age,
+                player_position=player.social.position,
+                location=self._location_display(player, world_state),
+                tags=", ".join(player.tags),
+                strength=player.stats.strength,
+                agility=player.stats.agility,
+                intelligence=player.stats.intelligence,
+                luck=player.stats.luck,
+                health=player.stats.health,
+                max_health=player.stats.max_health,
+                energy=player.stats.energy,
+                max_energy=player.stats.max_energy,
+                gold=player.social.gold,
+                reputation=player.social.reputation,
+                status_effects=", ".join(player.status_effects) if player.status_effects else "正常",
+                relations=relations_text,
+                world_context=world_context,
+                age_info=age_info or "无年龄变化",
+                economy_info=economy_info or "无经济变化",
+                butterfly_info=butterfly_info or "你的行为尚未在世界上留下深刻印记。",
+                days_span=days_span,
+            )
+        else:
+            prompt = DAILY_NOVEL_CHAPTER_PROMPT.format(
+                style_instruction=self._get_style_instruction(world_style),
+                full_log=full_log,
+                player_name=player.name,
+                player_age=player.age,
+                player_position=player.social.position,
+                location=self._location_display(player, world_state),
+                tags=", ".join(player.tags),
+                strength=player.stats.strength,
+                agility=player.stats.agility,
+                intelligence=player.stats.intelligence,
+                luck=player.stats.luck,
+                health=player.stats.health,
+                max_health=player.stats.max_health,
+                energy=player.stats.energy,
+                max_energy=player.stats.max_energy,
+                gold=player.social.gold,
+                reputation=player.social.reputation,
+                status_effects=", ".join(player.status_effects) if player.status_effects else "正常",
+                relations=relations_text,
+                world_context=world_context,
+                age_info=age_info or "无年龄变化",
+                economy_info=economy_info or "无经济变化",
+                butterfly_info=butterfly_info or "你的行为尚未在世界上留下深刻印记。",
+            )
+        return self.llm.chat(prompt, temperature=0.9, max_tokens=max_tokens)
 
     def generate_world_evolution(self, all_events: str, player_impacts: str,
                                  world_changes: str,

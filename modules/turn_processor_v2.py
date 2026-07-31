@@ -28,7 +28,8 @@ if TYPE_CHECKING:
 from .world_rules import WorldRulesEngine
 from .intent_classifier import IntentClassifier, IntentType, GenerationStrategy, TemplateGenerator
 from .social_network import SocialNetwork
-from .prompt_utils import resolve_location_name  # [Bug] location code → display name
+from .prompt_utils import resolve_location_name, sanitize_player_input  # [Bug] location code → display name | [v1.4 P2-10] Prompt injection 防护
+from .narrative_timekeeper import parse_time_skip_from_text  # [Bug v9.1] 玩家输入时间跳跃预检测
 
 logger = logging.getLogger("chronoverse.turn_processor")
 
@@ -133,12 +134,51 @@ class TurnProcessorV2:
                 eng.task_queue.post(func, *args, **kwargs)
                 return
             except Exception as e:
-                logger.warning("后台队列投递失败 [%s]: %s, 改为同步执行", func_name, e)
+                logger.warning("后台队列投递失败 [%s]: %s, 改为同步执行", func_name, e, exc_info=True)
         try:
             func(*args, **kwargs)
         except Exception as e:
             # [v11] 改为 warning 级别 + 函数名，不再静默吞掉
-            logger.warning("后台任务执行失败 [%s]: %s", func_name, e)
+            logger.warning("后台任务执行失败 [%s]: %s", func_name, e, exc_info=True)
+
+    # ── [v1.5 第一期] 闭关/隐居状态识别 ──────────────────────────
+    _SECLUSION_KEYWORDS = ("闭关", "潜修", "静修", "苦修")
+    _HIDEOUT_KEYWORDS = ("隐居", "隐遁", "归隐", "隐遁山林")
+    _EMERGE_KEYWORDS = ("出关", "离开洞府", "结束闭关", "结束潜修", "结束静修", "出定")
+
+    def _update_seclusion_status(self, player_input: str) -> None:
+        """根据玩家输入更新 status_effects 中的闭关/隐居标记。
+        - 识别"闭关/潜修/静修/苦修" → 添加 "闭关中"
+        - 识别"隐居/归隐" → 添加 "隐居中"
+        - 识别"出关/离开洞府/结束闭关" → 移除上述标记
+        """
+        eng = self.engine
+        if not eng.player_state:
+            return
+        status = eng.player_state.status_effects or []
+
+        # 出关优先（同时清除两个状态）
+        if any(kw in player_input for kw in self._EMERGE_KEYWORDS):
+            new_status = [s for s in status if s not in ("闭关中", "隐居中")]
+            if len(new_status) != len(status):
+                eng.player_state.status_effects = new_status
+                logger.info("Seclusion ended by player input: %s", player_input[:30])
+            return
+
+        # 闭关（仅当当前不在闭关/隐居时添加）
+        if any(kw in player_input for kw in self._SECLUSION_KEYWORDS):
+            if "闭关中" not in status and "隐居中" not in status:
+                status.append("闭关中")
+                eng.player_state.status_effects = status
+                logger.info("Seclusion started (闭关中) by player input: %s", player_input[:30])
+            return
+
+        # 隐居
+        if any(kw in player_input for kw in self._HIDEOUT_KEYWORDS):
+            if "隐居中" not in status and "闭关中" not in status:
+                status.append("隐居中")
+                eng.player_state.status_effects = status
+                logger.info("Seclusion started (隐居中) by player input: %s", player_input[:30])
 
     def _check_spatial_consistency(self, player_input: str) -> str:
         """检测玩家输入是否与当前空间环境矛盾，返回提示文本（无矛盾则返回空）。"""
@@ -193,8 +233,20 @@ class TurnProcessorV2:
                     loc_name = loc_data.location_name or ""
                 elif hasattr(loc_data, "name"):
                     loc_name = loc_data.name or ""
-                if loc_name and loc_name in player_input and loc_key != current_location:
-                    mentioned_locs.append(loc_name)
+                if not loc_name or loc_name not in player_input:
+                    continue
+                # [Bug] 跳过玩家当前所在地点（code 或显示名称匹配）
+                # 避免把"玩家位于落霞城，输入提到落霞城"误判为瞬移
+                if loc_key == current_location:
+                    continue
+                # [Bug] 显示名称相同也跳过（玩家位置 code 与地图 key 可能不一致）
+                if loc_name == current_loc_name:
+                    continue
+                # [Bug] 模糊匹配：处理"剑渊峰附近"vs"剑渊峰"等子串关系
+                # 玩家当前位置包含地点名（或反之）时，视为同一地点
+                if (loc_name in current_loc_name) or (current_loc_name in loc_name):
+                    continue
+                mentioned_locs.append(loc_name)
 
             if mentioned_locs:
                 locs_str = "、".join(mentioned_locs[:3])
@@ -286,7 +338,7 @@ class TurnProcessorV2:
                         response.setdefault("_options_refreshed_from_narrative", True)
                         return refreshed[:3]
             except Exception as e:
-                logger.warning("Contextual option refresh failed: %s", e)
+                logger.warning("Contextual option refresh failed: %s", e, exc_info=True)
 
         # [v11] 兜底被检测到 或 中间重试后仍通用 → 直接走强约束
         logger.info("Using force contextual options (is_fallback=%s)", is_fallback)
@@ -333,14 +385,77 @@ class TurnProcessorV2:
             if opts and len(opts) >= 3 and not self._options_need_refresh(opts, narrative):
                 return opts[:3]
         except Exception as e:
-            logger.warning("Force contextual options failed: %s", e)
+            logger.warning("Force contextual options failed: %s", e, exc_info=True)
         return []
 
     # ── [v11] 行动合理性校验（cheap LLM 快速判断） ──────────────────────
+    def _rule_based_validate(self, player_input: str, world_type: str):
+        """[D] 规则预检：返回 (verdict, reason)。
+
+        verdict:
+        - 'reject': 明显不可能，直接拒绝（不调 LLM）
+        - 'pass': 明显可能或安全，跳过 LLM
+        - 'uncertain': 可疑，需要 LLM 判断
+
+        设计原则：宁可放过，不可错杀。只拦截物理上绝对不可能的行动。
+        """
+        wt = (world_type or "").lower()
+
+        # 古代/中世纪世界类型（禁止现代科技）
+        ancient_keywords = ["historical", "wuxia", "xianxia", "fantasy", "历史", "武侠", "仙侠", "奇幻", "古风"]
+        is_ancient = any(kw in wt for kw in ancient_keywords)
+
+        # 现代科技词（在古代世界里绝对不可能存在）
+        modern_tech = ["冲锋枪", "手枪", "步枪", "手机", "电脑", "电视", "互联网", "激光",
+                       "核武", "核弹", "火箭", "电灯", "电话", "汽车", "飞机", "高铁",
+                       "地铁", "wifi", "蓝牙", "无人机", "导弹", "坦克", "雷达", "gps",
+                       "机器人", "人工智能", "电击器", "对讲机", "摄像机", "照相机", "广播"]
+
+        if is_ancient:
+            # 动作动词 + 现代科技词 组合才拦截（避免"我看见手机海报"这种描述被误杀）
+            action_verbs = ["掏出", "拿出", "使用", "召唤", "启动", "打开", "按下", "驾驶", "发射", "装备"]
+            for tech in modern_tech:
+                if tech in player_input:
+                    for verb in action_verbs:
+                        if verb in player_input:
+                            return "reject", f"当前是古代世界，不存在「{tech}」这种现代科技"
+
+        # 凡人世界禁止超能力（仙侠/奇幻允许）
+        mortal_keywords = ["historical", "modern", "apocalypse", "历史", "现代", "末日"]
+        is_mortal = any(kw in wt for kw in mortal_keywords)
+
+        if is_mortal:
+            impossible_abilities = [
+                ("凭空飞行", "凡人世界无法凭空飞行"),
+                ("瞬间移动", "凡人世界无法瞬间移动"),
+                ("分身", "凡人世界无法分身"),
+                ("飞升", "凡人世界无法飞升"),
+                ("长生不老", "凡人世界无法长生不老"),
+                ("起死回生", "凡人世界无法起死回生"),
+            ]
+            for ability, reason in impossible_abilities:
+                if ability in player_input:
+                    return "reject", reason
+
+        # 明显安全的行动（短输入 + 观察/休息/管理类关键词），跳过 LLM
+        if len(player_input) < 30:
+            safe_keywords = ["观察", "看看", "环顾", "查看", "休息", "睡觉", "坐下",
+                             "整理", "打开背包", "查看状态", "看看四周", "看看周围",
+                             "什么也不做", "发呆", "冥想", "打坐", "练功", "吃饭", "喝水"]
+            if any(kw in player_input for kw in safe_keywords):
+                return "pass", None
+
+        return "uncertain", None
+
     def _validate_player_action(self, player_input: str, narrative_history: list,
                                 player_state, world_state, npc_states) -> dict | None:
         """用 cheap LLM 快速判断玩家行动是否合理。返回 None 表示通过，否则返回拒绝响应 dict。
-        仅拦截明显不可能的行动（如中世纪掏冲锋枪），不干涉合理范围内的自由行动。"""
+        仅拦截明显不可能的行动（如中世纪掏冲锋枪），不干涉合理范围内的自由行动。
+
+        [D] 优化：先做规则预检（_rule_based_validate），命中 'reject' 直接拒绝，
+        命中 'pass' 直接通过，只有 'uncertain' 才调 cheap LLM。
+        这样能省下大量明显安全/明显不可能的回合的 LLM 调用。
+        """
         eng = self.engine
         if not eng.cheap_llm:
             return None
@@ -357,12 +472,30 @@ class TurnProcessorV2:
         elif eng.world_def:
             world_type = eng.world_def.get("world_type", "")
 
+        # [D] 规则预检：明显不可能/明显安全的行动不调 LLM
+        verdict, reason = self._rule_based_validate(player_input, world_type)
+        if verdict == "reject":
+            logger.info("规则预检拦截（省 LLM）: %s → %s", player_input[:30], reason)
+            return {
+                "narrative": f"⚠️ 行动与世界观冲突：{reason}\n\n请换一个更符合当前世界设定的行动。",
+                "options": [
+                    {"id": "A", "text": "环顾四周，观察环境", "type": "action", "risk": "low"},
+                    {"id": "B", "text": "与身边的人交谈", "type": "talk", "risk": "low"},
+                    {"id": "C", "text": "坚持原行动", "type": "action", "risk": "medium"},
+                ],
+            }
+        if verdict == "pass":
+            logger.info("规则预检通过（省 LLM）: %s", player_input[:30])
+            return None
+
         location = resolve_location_name(player_state.location, world_state) if player_state else "未知"
 
+        # [v1.4 P2-10] Prompt injection 防护
+        safe_input = sanitize_player_input(player_input)
         validation_prompt = (
             f"【世界类型】{world_type or '自定义'}\n"
             f"【当前场景】{location}\n"
-            f"【玩家行动】{player_input}\n\n"
+            f"【玩家行动】{safe_input}\n\n"
             f"判断这个行动在当前世界中是否物理上不可能实现？\n"
             f"只回答OK或NO。\n"
             f"OK = 行动在逻辑上是可能的（即使很离谱或危险）\n"
@@ -386,7 +519,7 @@ class TurnProcessorV2:
                 }
             logger.info("行动校验通过: %s", player_input[:30])
         except Exception as e:
-            logger.warning("行动校验失败（跳过校验）: %s", e)
+            logger.warning("行动校验失败（跳过校验）: %s", e, exc_info=True)
 
         return None
 
@@ -452,6 +585,25 @@ class TurnProcessorV2:
         logger.info("Intent classified: %s (strategy=%s, confidence=%.2f)",
                     intent.intent_type.value, intent.strategy.value, intent.confidence)
 
+        # [v1.5 第一期] 闭关/隐居识别：玩家明确表达"闭关修炼 N 天"时，设置 status_effects，
+        # 让 WorldTick 在跨日时大幅降低打扰概率（闭关中→0.02，隐居中→0.10）。
+        # 简化实现：仅按关键词识别，不做天数推断（让叙事系统处理时间流逝）。
+        # 出关由玩家后续输入"出关/离开洞府"等关键词清除。
+        try:
+            self._update_seclusion_status(player_input)
+        except Exception as e:
+            logger.warning("Seclusion status update failed: %s", e, exc_info=True)
+
+        # [v1.5 第二期] 立场名誉系统：玩家行为 → NPC 立场反应（纯规则，不调 LLM）
+        # 注意：行动校验通过后才应用反应（见下方 _validate_player_action 通过后）
+        # 这里只识别但不应用，避免被拒行为产生副作用
+        try:
+            from .alignment_system import detect_player_action, apply_player_action_to_npcs
+            self._pending_alignment_actions = detect_player_action(player_input)
+        except Exception as e:
+            logger.warning("Alignment detection failed: %s", e, exc_info=True)
+            self._pending_alignment_actions = []
+
         # ========== v9新增：Step 1: 世界规则引擎计算 ==========
         rule_result = self.rules_engine.evaluate_player_action(
             player_input, eng.player_state, eng.world_state, eng.npc_states
@@ -476,81 +628,26 @@ class TurnProcessorV2:
         rule_result.apply_to_player(eng.player_state)
         rule_result.apply_to_world(eng.world_state)
 
-        # 构建固定prompt
-        fixed_prompt = eng._get_fixed_prompt()
-        time_context = eng._get_time_context()
-        if time_context:
-            fixed_prompt = fixed_prompt + "\n\n" + time_context if fixed_prompt else time_context
+        # [v1.5 第二期] 校验通过后应用立场名誉反应（玩家行为 → NPC 立场反应）
+        if getattr(self, "_pending_alignment_actions", None):
+            try:
+                from .alignment_system import apply_player_action_to_npcs
+                reactions = apply_player_action_to_npcs(
+                    player_input, eng.npc_states, eng.player_state,
+                )
+                if reactions:
+                    logger.info(
+                        "Alignment reactions applied: %d NPCs reacted",
+                        len(reactions),
+                    )
+                    # 反应记录可供叙事引擎参考（暂存到 engine 上下文）
+                    eng._last_alignment_reactions = reactions
+            except Exception as e:
+                logger.warning("Alignment reaction apply failed: %s", e, exc_info=True)
+            self._pending_alignment_actions = []
 
-        # ========== v9新增：注入规则引擎上下文 ==========
-        rules_context = self.rules_engine.get_world_context_summary(
-            eng.player_state, eng.world_state, eng.npc_states
-        )
-        if rules_context:
-            fixed_prompt = fixed_prompt + "\n\n" + rules_context if fixed_prompt else rules_context
-
-        # ========== [v10.7] 空间一致性检查：注入否定提示 ==========
-        spatial_hint = self._check_spatial_consistency(player_input)
-        if spatial_hint:
-            fixed_prompt = fixed_prompt + "\n\n" + spatial_hint if fixed_prompt else spatial_hint
-            logger.info("Spatial consistency hint injected: %s...", spatial_hint[:80])
-
-        # ========== [Bug] 注入叙事风格+视角指令（必须注入，否则视角设置不生效）==========
-        try:
-            world_style = ""
-            if eng.world_def:
-                world_style = eng.world_def.get("world_type", "")
-            style_instruction = eng.narrative.style_manager.get_style_instruction(world_style)
-            if style_instruction:
-                fixed_prompt = fixed_prompt + "\n\n" + style_instruction if fixed_prompt else style_instruction
-        except Exception:
-            pass
-
-        # ========== v9新增：注入社会网络上下文 ==========
-        social_context = self.social_network.get_network_summary(eng.npc_states)
-        if social_context:
-            fixed_prompt = fixed_prompt + "\n\n" + social_context if fixed_prompt else social_context
-
-        # ========== v9新增：叙事规则提示 ==========
-        if rule_result.narrative_hints:
-            hints_text = "\n".join(f"- {h}" for h in rule_result.narrative_hints)
-            fixed_prompt = fixed_prompt + f"\n\n【世界规则引擎判定】\n{hints_text}"
-
-        # ========== [v10] 注入闭环学习教训 ==========
-        if eng.narrative_reviewer and eng.narrative_reviewer.lessons:
-            lessons_text = eng.narrative_reviewer.get_lessons_for_prompt(max_lessons=3)
-            if lessons_text:
-                fixed_prompt = fixed_prompt + "\n\n" + lessons_text
-
-        # ========== [v10] 注入工作记忆上下文 ==========
-        if eng.memory:
-            working_memory = eng.memory.get_working_memory_context(max_items=2)
-            if working_memory:
-                fixed_prompt = fixed_prompt + "\n\n" + working_memory
-
-        # ========== [v10+] 注入活跃伏笔上下文 ==========
-        if eng.foreshadow_lifecycle:
-            hooks_text = eng.foreshadow_lifecycle.get_hooks_for_prompt(max_hooks=3)
-            if hooks_text:
-                fixed_prompt = fixed_prompt + "\n\n" + hooks_text
-
-        # ========== [v10++] 注入角色动态状态（CHIRON 式） ==========
-        character_state_text = self._build_character_state_context(eng)
-        if character_state_text:
-            fixed_prompt = fixed_prompt + "\n\n" + character_state_text
-
-        # ========== [v10+] 叙事类型感知：检测当前场景类型（GraphRAG 动态启停） ==========
-        scene_result = self._detect_scene_type(eng, player_input, fixed_prompt)
-        scene_type = scene_result.scene_type if scene_result else None
-        if scene_type is not None:
-            logger.info(
-                "Scene detected: type=%s confidence=%.2f dynamic=%s",
-                scene_type.value, scene_result.confidence, scene_result.is_dynamic,
-            )
-            # 将场景氛围信息注入叙事生成 prompt，帮助 LLM 理解当前场景
-            scene_hint = self._build_scene_hint(scene_result)
-            if scene_hint:
-                fixed_prompt = fixed_prompt + "\n\n" + scene_hint
+        # 构建固定prompt（注入所有上下文：世界观/规则/风格/记忆/伏笔等，时间锚点单独抽出）
+        fixed_prompt, scene_type, time_anchor = self._build_fixed_prompt(player_input, rule_result)
 
         # ========== v9新增：Step 2: 根据策略生成叙事 ==========
         narrative = ""
@@ -570,7 +667,8 @@ class TurnProcessorV2:
                 try:
                     narrative, options, response = self._generate_multi_agent(
                         player_input, npc_names, fixed_prompt,
-                        scene_type=scene_type, critical_reason=multi_agent_reason
+                        scene_type=scene_type, critical_reason=multi_agent_reason,
+                        time_anchor=time_anchor
                     )
                     if narrative:
                         multi_agent_used = True
@@ -583,7 +681,7 @@ class TurnProcessorV2:
                             "Multi-agent narrative returned empty, falling back to single LLM"
                         )
                 except Exception as e:
-                    logger.warning("Multi-agent narrative failed, falling back: %s", e)
+                    logger.warning("Multi-agent narrative failed, falling back: %s", e, exc_info=True)
                     narrative = ""
 
         # [v10+++] 更新连续被动回合计数（用于转折点检测，需在检测之后更新）
@@ -597,17 +695,20 @@ class TurnProcessorV2:
             if intent.strategy == GenerationStrategy.TEMPLATE:
                 # 模板生成，不需要LLM
                 narrative, options, response = self._generate_from_template(
-                    intent, player_input, npc_names, fixed_prompt, scene_type=scene_type
+                    intent, player_input, npc_names, fixed_prompt, scene_type=scene_type,
+                    time_anchor=time_anchor
                 )
             elif intent.strategy == GenerationStrategy.LIGHT_LLM:
                 # 轻量LLM调用
                 narrative, options, response = self._generate_light_llm(
-                    player_input, npc_names, fixed_prompt, scene_type=scene_type
+                    player_input, npc_names, fixed_prompt, scene_type=scene_type,
+                    time_anchor=time_anchor
                 )
             else:
                 # 完整LLM调用（原有逻辑）
                 narrative, options, response = self._generate_full_llm(
-                    player_input, npc_names, fixed_prompt, scene_type=scene_type
+                    player_input, npc_names, fixed_prompt, scene_type=scene_type,
+                    time_anchor=time_anchor
                 )
 
         # [Bug] 选项必须跟随本轮正文末尾。轻量模式/兜底模式容易产生“观察四周、整理思绪”
@@ -652,14 +753,8 @@ class TurnProcessorV2:
         # Step 8: 死亡检测
         death, suicide_confirm = self._handle_death(is_suicide)
 
-        # Step 9: RAG记忆存储（[v10] 使用带重要性的存储）→ 后台异步
-        self._bg(self._store_to_rag_v10, narrative, player_input, impact)
-
-        # Step 10: GraphRAG构建 → 后台异步
-        self._bg(self._build_graph_rag, narrative)
-
-        # ========== [v10++] Step 10.1: 角色动态状态分析（CHIRON 式）→ 后台异步 ==========
-        self._bg(self._analyze_character_states, narrative)
+        # Step 9 ~ Step 14.9: 后台异步任务集合（RAG/GraphRAG/角色状态/NPC记忆/技能学习/叙事回顾/记忆整理/连续性审计/性格演化/因果链）
+        bg_results = self._run_post_turn_background(player_input, narrative, rule_result, impact, world_event)
 
         # Step 11: 身份审计
         audit_results = self._run_identity_audit(narrative)
@@ -677,38 +772,16 @@ class TurnProcessorV2:
                 eng.world_state.current_day if eng.world_state else 1
             )
 
-        # ========== [v10] Step 14.1: NPC 程序性记忆记录 ==========
-        self._record_npc_procedural_memory(narrative, player_input)
-
-        # ========== [v10++] Step 14.1.1: NPC 技能自学（Voyager/Hermes 式）→ 后台异步 ==========
-        self._bg(self._record_npc_skill_learning, narrative, player_input)
-
-        # ========== [v10] Step 14.2: 世界任务板推进 ==========
+        # Step 14.2: 世界任务板推进
         task_board_result = self._advance_task_board()
 
-        # ========== [v10] Step 14.2.1: 任务系统检查（附近任务 + 截止检查）==========
+        # Step 14.2.1: 任务系统检查
         quest_result = self._advance_quest_system(narrative)
 
-        # ========== [v10] Step 14.3: 叙事回顾（闭环学习） → 异步后台执行 ==========
-        # [优化] 叙事评审耗时长（~15s），改为后台异步执行，不阻塞玩家响应
-        review_result = {"skipped": True, "reason": "async_deferred"}
-        self._bg(self._run_narrative_review_sync)
-
-        # ========== [v10] Step 14.4: 记忆 Curator 整理 → 异步后台执行 ==========
-        # [优化] 记忆 Curator 整理耗时长（~5-10s），改为后台异步执行，不阻塞玩家响应
-        curator_result = {"skipped": True, "reason": "async_deferred"}
-        self._bg(self._run_memory_curator_sync)
-
-        # ========== [v10+] Step 14.5: 伏笔生命周期追踪 ==========
+        # Step 14.5: 伏笔生命周期追踪
         foreshadow_result = self._track_foreshadow(narrative, player_input)
 
-        # ========== [v10+] Step 14.6: 多维度连续性审计 → 异步后台执行 ==========
-        # [优化] 连续性审计耗时长（~6s），改为后台异步执行，不阻塞玩家响应
-        audit_result = {"skipped": True, "reason": "async_deferred"}
-        self._bg(self._run_continuity_audit_sync)
-
-        # ========== [v10++] Step 14.7: Agent 自主记忆管理（MemGPT/Letta 式）→ 后台异步 ==========
-        # Agent 自主评估上下文压力与记忆冗余，主动执行摘要/丢弃/归档/提升操作
+        # Step 14.7: Agent 自主记忆管理（MemGPT/Letta 式）
         amm_result = self._run_autonomous_memory()
 
         # ========== v9新增：Step 15: 保存状态快照 ==========
@@ -740,13 +813,13 @@ class TurnProcessorV2:
             generation_strategy=intent.strategy.value,
             # [v10] 新增字段
             butterfly_approval=butterfly_approval,
-            narrative_review=review_result,
+            narrative_review=bg_results["review"],
             task_board=task_board_result,
-            curator=curator_result,
+            curator=bg_results["curator"],
             lessons_injected=bool(eng.narrative_reviewer and eng.narrative_reviewer.lessons),
             # [v10+] 新增字段
             foreshadow=foreshadow_result,
-            continuity_audit=audit_result,
+            continuity_audit=bg_results["audit"],
             # [v10++] Agent 自主记忆管理（MemGPT/Letta 式）
             autonomous_memory=amm_result,
             # [v10++] 角色动态状态统计（CHIRON 式）
@@ -762,7 +835,223 @@ class TurnProcessorV2:
             },
         )
 
-    def _generate_from_template(self, intent, player_input, npc_names, fixed_prompt, scene_type=None) -> tuple:
+    # ── [重构] 从 process() 抽取的子方法 ──────────────────────
+
+    def _build_fixed_prompt(self, player_input: str, rule_result) -> tuple:
+        """构建回合固定 prompt，注入所有上下文（世界观/规则/风格/记忆/伏笔等）。
+
+        返回 (fixed_prompt, scene_type, time_anchor)。
+        - fixed_prompt：不含时间锚点（时间锚点改为独立 system message 注入，避免被大量上下文淹没）
+        - scene_type 为 None 表示未检测到特定场景类型。
+        - time_anchor：抽离的时间锚点字符串（叙事时间追踪 + 玩家输入时间跳跃提示），无则为空串。
+        """
+        eng = self.engine
+
+        # 构建基础 prompt
+        fixed_prompt = eng._get_fixed_prompt()
+        time_context = eng._get_time_context()
+
+        # [Bug v9.1] 玩家输入时间跳跃预检测
+        player_time_hint = self._build_player_time_skip_hint(player_input)
+        if player_time_hint:
+            logger.info("Player time skip hint injected: %s", player_time_hint[:120])
+
+        # [P3-A] 时间锚点抽离：不再混入 fixed_prompt，改为独立 system message 注入。
+        # [P3-B] 状态快照同样抽离，与时间锚点一起作为独立 system message 注入。
+        # 原 fixed_prompt 把时间/状态与世界观/规则/记忆等大量上下文拼在一起，
+        # 关键锚点信息容易被 LLM 忽略，导致叙事时间线倒退或状态脱节。
+        state_snapshot = self._build_state_snapshot(eng)
+        _time_anchor_parts = []
+        if state_snapshot:
+            _time_anchor_parts.append(state_snapshot)
+        if time_context:
+            _time_anchor_parts.append(time_context)
+        if player_time_hint:
+            _time_anchor_parts.append(player_time_hint)
+        time_anchor = "\n\n".join(_time_anchor_parts) if _time_anchor_parts else ""
+
+        # [v11.1] 注入世界观补充设定
+        world_intro = (eng.world_def or {}).get("world_intro", "").strip() if eng.world_def else ""
+        if world_intro:
+            intro_hint = f"【世界观补充设定 - 必须遵循】\n{world_intro[:400]}"
+            fixed_prompt = fixed_prompt + "\n\n" + intro_hint if fixed_prompt else intro_hint
+
+        # v9新增：注入规则引擎上下文
+        rules_context = self.rules_engine.get_world_context_summary(
+            eng.player_state, eng.world_state, eng.npc_states
+        )
+        if rules_context:
+            fixed_prompt = fixed_prompt + "\n\n" + rules_context if fixed_prompt else rules_context
+
+        # [v10.7] 空间一致性检查：注入否定提示
+        spatial_hint = self._check_spatial_consistency(player_input)
+        if spatial_hint:
+            fixed_prompt = fixed_prompt + "\n\n" + spatial_hint if fixed_prompt else spatial_hint
+            logger.info("Spatial consistency hint injected: %s...", spatial_hint[:80])
+
+        # [Bug] 注入叙事风格+视角指令
+        try:
+            world_style = ""
+            if eng.world_def:
+                world_style = eng.world_def.get("world_type", "")
+            style_instruction = eng.narrative.style_manager.get_style_instruction(world_style)
+            if style_instruction:
+                fixed_prompt = fixed_prompt + "\n\n" + style_instruction if fixed_prompt else style_instruction
+        except Exception:
+            pass
+
+        # v9新增：注入社会网络上下文
+        social_context = self.social_network.get_network_summary(eng.npc_states)
+        if social_context:
+            fixed_prompt = fixed_prompt + "\n\n" + social_context if fixed_prompt else social_context
+
+        # v9新增：叙事规则提示
+        if rule_result.narrative_hints:
+            hints_text = "\n".join(f"- {h}" for h in rule_result.narrative_hints)
+            fixed_prompt = fixed_prompt + f"\n\n【世界规则引擎判定】\n{hints_text}"
+
+        # [v10] 注入闭环学习教训
+        if eng.narrative_reviewer and eng.narrative_reviewer.lessons:
+            lessons_text = eng.narrative_reviewer.get_lessons_for_prompt(max_lessons=3)
+            if lessons_text:
+                fixed_prompt = fixed_prompt + "\n\n" + lessons_text
+
+        # [v10] 注入工作记忆上下文
+        if eng.memory:
+            working_memory = eng.memory.get_working_memory_context(max_items=2)
+            if working_memory:
+                fixed_prompt = fixed_prompt + "\n\n" + working_memory
+
+        # [v10+] 注入活跃伏笔上下文
+        if eng.foreshadow_lifecycle:
+            hooks_text = eng.foreshadow_lifecycle.get_hooks_for_prompt(max_hooks=3)
+            if hooks_text:
+                fixed_prompt = fixed_prompt + "\n\n" + hooks_text
+
+        # [v10++] 注入角色动态状态（CHIRON 式）
+        character_state_text = self._build_character_state_context(eng)
+        if character_state_text:
+            fixed_prompt = fixed_prompt + "\n\n" + character_state_text
+
+        # [v1.3] 注入 MemoryBrief 常驻摘要
+        try:
+            if eng.memory_brief:
+                brief_text = eng.memory_brief.get_briefs_for_prompt()
+                if brief_text:
+                    fixed_prompt = fixed_prompt + "\n\n" + brief_text if fixed_prompt else brief_text
+        except Exception as e:
+            logger.debug("MemoryBrief injection failed: %s", e, exc_info=True)
+
+        # [v10+] 叙事类型感知：检测当前场景类型
+        scene_result = self._detect_scene_type(eng, player_input, fixed_prompt)
+        scene_type = scene_result.scene_type if scene_result else None
+        if scene_type is not None:
+            logger.info(
+                "Scene detected: type=%s confidence=%.2f dynamic=%s",
+                scene_type.value, scene_result.confidence, scene_result.is_dynamic,
+            )
+            scene_hint = self._build_scene_hint(scene_result)
+            if scene_hint:
+                fixed_prompt = fixed_prompt + "\n\n" + scene_hint
+
+        return fixed_prompt, scene_type, time_anchor
+
+    def _build_state_snapshot(self, eng) -> str:
+        """[P3-B] 构建当前状态快照，让 LLM 清晰感知游戏当前态。
+
+        与散落在 world_text/npc_text/player_text 中的详细状态不同，此快照只提取
+        最关键的"当前锚点"信息（天数/时段/位置/目标），作为独立 system message
+        注入，避免叙事与状态脱节（如玩家已在B地，叙事却说还在A地）。
+        """
+        parts = ["【当前状态快照 - 叙事必须遵循】"]
+        try:
+            ws = eng.world_state
+            if ws is not None:
+                # 游戏进度
+                progress_parts = [f"第{ws.current_day}天"]
+                era = getattr(ws, "era_name", "")
+                if era:
+                    progress_parts.append(f"{era}{getattr(ws, 'era_year', 1)}年")
+                season = getattr(ws, "season", "")
+                if season:
+                    progress_parts.append(season)
+                weather = getattr(ws, "weather", "")
+                if weather:
+                    progress_parts.append(weather)
+                parts.append("游戏进度：" + " · ".join(progress_parts))
+                # 当前时间段
+                cur_time = getattr(ws, "current_time", "")
+                if cur_time:
+                    parts.append(f"当前时段：{cur_time}")
+        except Exception as e:
+            logger.debug("State snapshot world_state failed: %s", e, exc_info=True)
+        try:
+            ps = eng.player_state
+            if ps is not None:
+                loc = getattr(ps, "location", "")
+                if loc:
+                    parts.append(f"玩家位置：{loc}")
+                goal = getattr(ps, "current_goal", "")
+                if goal:
+                    parts.append(f"当前目标：{goal}")
+        except Exception as e:
+            logger.debug("State snapshot player_state failed: %s", e, exc_info=True)
+        if len(parts) <= 1:
+            return ""
+        parts.append("叙事必须与上述当前状态保持一致，禁止倒退到之前的时间、地点或场景。")
+        return "\n".join(parts)
+
+    def _run_post_turn_background(self, player_input: str, narrative: str,
+                                  rule_result, impact, world_event) -> dict:
+        """执行回合后所有后台异步任务（Step 9 ~ Step 14.9）。
+
+        返回各任务的同步结果（异步任务返回 deferred 标记）。
+        """
+        eng = self.engine
+
+        # Step 9: RAG记忆存储 → 后台异步
+        self._bg(self._store_to_rag_v10, narrative, player_input, impact)
+
+        # Step 10: GraphRAG构建 → 后台异步
+        self._bg(self._build_graph_rag, narrative)
+
+        # Step 10.1: 角色动态状态分析（CHIRON 式）→ 后台异步
+        self._bg(self._analyze_character_states, narrative)
+
+        # Step 14.1: NPC 程序性记忆记录
+        self._record_npc_procedural_memory(narrative, player_input)
+
+        # Step 14.1.1: NPC 技能自学（Voyager/Hermes 式）→ 后台异步
+        self._bg(self._record_npc_skill_learning, narrative, player_input)
+
+        # Step 14.3: 叙事回顾（闭环学习）→ 异步后台执行
+        self._bg(self._run_narrative_review_sync)
+
+        # Step 14.4: 记忆 Curator 整理 → 异步后台执行
+        self._bg(self._run_memory_curator_sync)
+
+        # Step 14.4.1: MemoryBrief 增量更新 + 睡眠巩固 → 异步后台执行
+        self._bg(self._run_memory_brief_update_sync)
+
+        # Step 14.6: 多维度连续性审计 → 异步后台执行
+        self._bg(self._run_continuity_audit_sync)
+
+        # Step 14.8: NPC 性格演化检测 → 后台异步
+        self._bg(self._check_personality_evolution, narrative)
+
+        # Step 14.9: 因果链节点记录 → 后台异步
+        self._bg(
+            self._record_causal_node,
+            player_input, narrative, rule_result, impact, world_event
+        )
+
+        return {
+            "review": {"skipped": True, "reason": "async_deferred"},
+            "curator": {"skipped": True, "reason": "async_deferred"},
+            "audit": {"skipped": True, "reason": "async_deferred"},
+        }
+
+    def _generate_from_template(self, intent, player_input, npc_names, fixed_prompt, scene_type=None, time_anchor: str = "") -> tuple:
         """模板生成（不需要LLM）"""
         eng = self.engine
         narrative = ""
@@ -785,7 +1074,7 @@ class TurnProcessorV2:
             options = result["options"]
         else:
             # 未知意图，回退到LLM
-            return self._generate_full_llm(player_input, npc_names, fixed_prompt, scene_type=scene_type)
+            return self._generate_full_llm(player_input, npc_names, fixed_prompt, scene_type=scene_type, time_anchor=time_anchor)
 
         response = {
             "narrative": narrative, "options": options,
@@ -838,18 +1127,32 @@ class TurnProcessorV2:
                 logger.debug("Failed to populate context_debug for template path: %s", _e)
         return narrative, options, response
 
-    def _generate_light_llm(self, player_input, npc_names, fixed_prompt, scene_type=None) -> tuple:
-        """轻量LLM调用"""
+    def _generate_light_llm(self, player_input, npc_names, fixed_prompt, scene_type=None, time_anchor: str = "") -> tuple:
+        """轻量LLM调用
+
+        [A] 修复：原先构建的 light_prompt 局部变量是死代码（构建后从未传入 LLM）。
+        实际行为：使用完整 fixed_prompt 上下文，通过 max_context=2048 限制 token 上限。
+        现在追加轻量叙事指令，让 LLM 知道这是探索/旅行/制造类动作，聚焦描述核心事件。
+        """
         eng = self.engine
         narrative = ""
         options = []
         response = {}
 
-        # 轻量上下文
-        light_prompt = f"当前场景：{resolve_location_name(eng.player_state.location, eng.world_state)}\n"  # [Bug] location code → display name
-        light_prompt += f"时间：{eng.world_state.current_time if eng.world_state else '未知'}\n"
-        light_prompt += f"玩家行动：{player_input}\n\n"
-        light_prompt += "请用2-3句话描述发生了什么。"
+        # [A] 给 fixed_prompt 追加轻量叙事指令（局部覆盖，字符串不可变不影响调用者）
+        # 让 LLM 知道这是轻量模式，聚焦核心事件，避免按完整叙事的 800 字要求过度展开
+        light_hint = (
+            "\n\n【轻量叙事模式】当前是探索/旅行/制造类动作，"
+            "请聚焦描述核心事件发展和玩家行动的直接结果，"
+            "不需要过多铺垫、环境描写或心理活动。"
+        )
+        fixed_prompt = (fixed_prompt + light_hint) if fixed_prompt else light_hint
+
+        # [Bug v9.1] 历史窗口与上下文预算从 config 读取
+        # v9 硬编码 [-3:] + 2048 token，导致 recent 层被压缩到 500 token，
+        # 上一轮 AI 输出的时间锚点丢失，引发上下文时间线倒退
+        _light_history = eng.narrative_history[-5:]  # 保留最近5条（含上一轮完整 AI 输出）
+        _light_max_ctx = getattr(eng, 'light_llm_max_context', 8000)  # 默认 8000，可配置
 
         try:
             if eng._stream_callback:
@@ -858,11 +1161,12 @@ class TurnProcessorV2:
                     world_state=eng.world_state.model_dump() if eng.world_state else None,
                     day=eng.world_state.current_day if eng.world_state else 1,
                     npc_states=eng.npc_states,
-                    narrative_history=eng.narrative_history[-3:],  # 只取最近3条
+                    narrative_history=_light_history,
                     fixed_prompt=fixed_prompt,
-                    max_context=2048,  # 轻量上下文
+                    max_context=_light_max_ctx,
                     scene_type=scene_type,
                     narrative_max_chars=getattr(eng, 'narrative_max_chars', 1000),
+                    time_anchor=time_anchor,
                 )
                 for token in token_gen:
                     if token:
@@ -876,37 +1180,45 @@ class TurnProcessorV2:
                 if narrative:
                     narrative = self._strip_time_skip_tag(narrative)
 
-                # [v11-fix] 轻量模式字数不足检测：在 stream_end 之前完成续写
+                # [v11-fix] 轻量模式字数不足续写：在 stream_end 之前完成，最多3轮
                 if narrative:
                     _lm_max = getattr(eng, 'narrative_max_chars', 1000)
                     _lm_min = int(_lm_max * 0.66)
                     _lm_count = len(narrative)
-                    if _lm_count > 0 and _lm_count < int(_lm_min * 0.8):
+                    _retry = 0
+                    while _lm_count > 0 and _lm_count < int(_lm_min * 0.9) and _retry < 3:
                         logger.info(
-                            "轻量LLM叙事字数不足 (%d < %d 的80%%)，尝试重新生成",
-                            _lm_count, _lm_min,
+                            "轻量LLM叙事字数不足 (%d < %d 的90%%)，第%d轮续写补充",
+                            _lm_count, _lm_min, _retry + 1,
                         )
                         try:
+                            _lm_continue = (
+                                f"[续写] 上一段叙事太短（只有{_lm_count}字），"
+                                f"请从以下位置接着写，至少再写{_lm_min - _lm_count}字：\n"
+                                f"……{narrative[-200:]}"
+                            )
                             token_gen2 = eng.player_agent.generate_narrative_stream(
-                                eng.player_state, player_input,
+                                eng.player_state, _lm_continue,
                                 world_state=eng.world_state.model_dump() if eng.world_state else None,
                                 day=eng.world_state.current_day if eng.world_state else 1,
                                 npc_states=eng.npc_states,
-                                narrative_history=eng.narrative_history[-3:],
+                                narrative_history=_light_history,
                                 fixed_prompt=fixed_prompt,
-                                max_context=2048,
+                                max_context=_light_max_ctx,
                                 scene_type=scene_type,
-                                narrative_max_chars=_lm_max,
+                                narrative_max_chars=_lm_min,
+                                time_anchor=time_anchor,
                             )
-                            narrative2 = ""
                             for token in token_gen2:
                                 if token:
-                                    narrative2 += token
+                                    narrative += token
                                     eng._stream_callback(token)
-                            if len(narrative2) > len(narrative):
-                                narrative = narrative2
                         except Exception as e2:
-                            logger.warning("轻量LLM叙事重新生成失败: %s", e2)
+                            logger.warning("轻量LLM叙事续写失败: %s", e2, exc_info=True)
+                            break
+                        _lm_count = len(narrative)
+                        _retry += 1
+                    logger.info("轻量LLM续写完成，总字数: %d", len(narrative))
 
                 # [v11-fix] 所续写完成后再发 stream_end
                 eng._stream_callback(None)
@@ -917,24 +1229,26 @@ class TurnProcessorV2:
                     day=eng.world_state.current_day if eng.world_state else 1,
                     npc_names=npc_names,
                     npc_states=eng.npc_states,
-                    narrative_history=eng.narrative_history[-3:],
+                    narrative_history=_light_history,
                     fixed_prompt=fixed_prompt,
-                    max_context=2048,
+                    max_context=_light_max_ctx,
                     strip_gray=eng._get_strip_gray_narrative(),
                     scene_type=scene_type,
                     narrative_max_chars=getattr(eng, 'narrative_max_chars', 1000),
+                    time_anchor=time_anchor,
                 )
                 narrative = response.get("narrative", "")
                 options = response.get("options", [])
-                # [v11-fix] 非流式模式也检测字数不足
+                # [v11-fix] 非流式模式也检测字数不足：低于90%则重新生成，最多3轮，取最长结果
                 if narrative:
                     _lm_max = getattr(eng, 'narrative_max_chars', 1000)
                     _lm_min = int(_lm_max * 0.66)
                     _lm_count = len(narrative)
-                    if _lm_count > 0 and _lm_count < int(_lm_min * 0.8):
+                    _retry = 0
+                    while _lm_count > 0 and _lm_count < int(_lm_min * 0.9) and _retry < 3:
                         logger.info(
-                            "轻量LLM非流式叙事字数不足 (%d < %d 的80%%)，尝试重新生成",
-                            _lm_count, _lm_min,
+                            "轻量LLM非流式叙事字数不足 (%d < %d 的90%%)，第%d轮重新生成",
+                            _lm_count, _lm_min, _retry + 1,
                         )
                         try:
                             response2 = eng.player_agent.generate_full_response(
@@ -943,28 +1257,32 @@ class TurnProcessorV2:
                                 day=eng.world_state.current_day if eng.world_state else 1,
                                 npc_names=npc_names,
                                 npc_states=eng.npc_states,
-                                narrative_history=eng.narrative_history[-3:],
+                                narrative_history=_light_history,
                                 fixed_prompt=fixed_prompt,
-                                max_context=2048,
+                                max_context=_light_max_ctx,
                                 strip_gray=eng._get_strip_gray_narrative(),
                                 scene_type=scene_type,
                                 narrative_max_chars=_lm_max,
+                                time_anchor=time_anchor,
                             )
                             narrative2 = response2.get("narrative", "")
                             if len(narrative2) > len(narrative):
                                 narrative = narrative2
                                 response = response2
                         except Exception as e2:
-                            logger.warning("轻量LLM叙事重新生成失败: %s", e2)
+                            logger.warning("轻量LLM叙事重新生成失败: %s", e2, exc_info=True)
+                            break
+                        _lm_count = len(narrative)
+                        _retry += 1
         except Exception as e:
-            logger.warning("Light LLM generation failed: %s", e)
+            logger.warning("Light LLM generation failed: %s", e, exc_info=True)
             narrative = ""
             # [v11-fix] 异常时也要发 stream_end，否则消费者永远等不到结束信号
             if eng._stream_callback:
                 eng._stream_callback(None)
 
         if not narrative:
-            return self._generate_full_llm(player_input, npc_names, fixed_prompt, scene_type=scene_type)
+            return self._generate_full_llm(player_input, npc_names, fixed_prompt, scene_type=scene_type, time_anchor=time_anchor)
 
         if not options:
             options = eng.player_agent._fallback_options(eng.player_state)
@@ -979,7 +1297,7 @@ class TurnProcessorV2:
         }
         return narrative, options, response
 
-    def _generate_full_llm(self, player_input, npc_names, fixed_prompt, scene_type=None) -> tuple:
+    def _generate_full_llm(self, player_input, npc_names, fixed_prompt, scene_type=None, time_anchor: str = "") -> tuple:
         """[v10.6] 完整LLM调用 — 两阶段流式生成：
         阶段1：流式输出叙事文本（逐字打字效果）
         阶段2：生成选项/状态变化等结构化元数据"""
@@ -1003,19 +1321,23 @@ class TurnProcessorV2:
                     max_context=eng._get_max_context(),
                     scene_type=scene_type,
                     narrative_max_chars=_narrative_max,
+                    time_anchor=time_anchor,
                 )
                 for token in token_gen:
                     if token:
                         narrative += token
                         eng._stream_callback(token)
 
-                # [v11-fix] 字数不足自动续写：如果叙事低于目标的80%就续写
+                # [v11-fix] 字数不足自动续写：叙事低于目标的90%就续写，最多3轮直到达标
                 # 注意：stream_end 必须在续写完成之后发送，否则消费者退出后续写内容丢失
                 _narr_char_count = len(narrative)
-                if _narr_char_count > 0 and _narr_char_count < int(_narrative_min * 0.8):
+                _retry = 0
+                while (_narr_char_count > 0
+                        and _narr_char_count < int(_narrative_min * 0.9)
+                        and _retry < 3):
                     logger.info(
-                        "叙事字数不足 (%d < %d 的80%%)，自动续写补充",
-                        _narr_char_count, _narrative_min,
+                        "叙事字数不足 (%d < %d 的90%%)，第%d轮自动续写补充",
+                        _narr_char_count, _narrative_min, _retry + 1,
                     )
                     try:
                         # [Bug#10] 续写必须保留系统prompt和身份锚定，使用 generate_narrative_stream
@@ -1035,16 +1357,20 @@ class TurnProcessorV2:
                             max_context=eng._get_max_context(),
                             scene_type=scene_type,
                             narrative_max_chars=_narrative_min,
+                            time_anchor=time_anchor,
                         )
                         for token in continue_gen:
                             if token:
                                 narrative += token
                                 eng._stream_callback(token)
-                        logger.info("续写完成，总字数: %d", len(narrative))
+                        logger.info("第%d轮续写完成，总字数: %d", _retry + 1, len(narrative))
                     except Exception as e:
-                        logger.warning("叙事续写失败: %s", e)
+                        logger.warning("叙事续写失败: %s", e, exc_info=True)
+                        break
+                    _narr_char_count = len(narrative)
+                    _retry += 1
             except Exception as e:
-                logger.warning("流式叙事生成失败: %s", e)
+                logger.warning("流式叙事生成失败: %s", e, exc_info=True)
 
             # [v11-fix] 无论成功/失败/续写，都必须发 stream_end，否则消费者永远等不到结束信号
             eng._stream_callback(None)
@@ -1059,7 +1385,7 @@ class TurnProcessorV2:
                     npc_states=eng.npc_states,
                 )
             except Exception as e:
-                logger.warning("Metadata generation failed, using fallback: %s", e)
+                logger.warning("Metadata generation failed, using fallback: %s", e, exc_info=True)
                 response = {"narrative": narrative}
         else:
             # ── 非流式模式（HTTP 调用）：一次调用同时返回叙事和选项 ──
@@ -1075,30 +1401,45 @@ class TurnProcessorV2:
                 strip_gray=eng._get_strip_gray_narrative(),
                 scene_type=scene_type,
                 narrative_max_chars=getattr(eng, 'narrative_max_chars', 1000),
+                time_anchor=time_anchor,
             )
             narrative = response.get("narrative", "")
-            # [v11] 非流式模式也检测字数不足
+            # [v11] 非流式模式也检测字数不足：低于90%则重新生成，最多3轮，取最长结果
             _narrative_max = getattr(eng, 'narrative_max_chars', 1000)
             _narrative_min = int(_narrative_max * 0.66)  # [v11] 与 prompt "至少80%" 对齐
             _narr_char_count = len(narrative)
-            if _narr_char_count > 0 and _narr_char_count < int(_narrative_min * 0.8):
+            _retry = 0
+            while (_narr_char_count > 0
+                    and _narr_char_count < int(_narrative_min * 0.9)
+                    and _retry < 3):
                 logger.info(
-                    "非流式叙事字数不足 (%d < %d 的80%%)，尝试重新生成",
-                    _narr_char_count, _narrative_min,
+                    "非流式叙事字数不足 (%d < %d 的90%%)，第%d轮重新生成",
+                    _narr_char_count, _narrative_min, _retry + 1,
                 )
-                response = eng.player_agent.generate_full_response(
-                    eng.player_state, player_input,
-                    world_state=eng.world_state.model_dump() if eng.world_state else None,
-                    day=eng.world_state.current_day if eng.world_state else 1,
-                    npc_names=npc_names,
-                    npc_states=eng.npc_states,
-                    narrative_history=eng.narrative_history,
-                    fixed_prompt=fixed_prompt,
-                    max_context=eng._get_max_context(),
-                    strip_gray=eng._get_strip_gray_narrative(),
-                    scene_type=scene_type,
-                    narrative_max_chars=_narrative_max,
-                )
+                try:
+                    response_new = eng.player_agent.generate_full_response(
+                        eng.player_state, player_input,
+                        world_state=eng.world_state.model_dump() if eng.world_state else None,
+                        day=eng.world_state.current_day if eng.world_state else 1,
+                        npc_names=npc_names,
+                        npc_states=eng.npc_states,
+                        narrative_history=eng.narrative_history,
+                        fixed_prompt=fixed_prompt,
+                        max_context=eng._get_max_context(),
+                        strip_gray=eng._get_strip_gray_narrative(),
+                        scene_type=scene_type,
+                        narrative_max_chars=_narrative_max,
+                        time_anchor=time_anchor,
+                    )
+                    narrative_new = response_new.get("narrative", "")
+                    if len(narrative_new) > len(narrative):
+                        narrative = narrative_new
+                        response = response_new
+                except Exception as e:
+                    logger.warning("非流式叙事重新生成失败: %s", e, exc_info=True)
+                    break
+                _narr_char_count = len(narrative)
+                _retry += 1
 
         narrative = response.get("narrative", narrative)
         options = response.get("options", [])
@@ -1158,7 +1499,7 @@ class TurnProcessorV2:
                         matched_reasons.append("foreshadow_recall")
                         break
             except Exception as e:
-                logger.debug("Foreshadow recall detection failed: %s", e)
+                logger.debug("Foreshadow recall detection failed: %s", e, exc_info=True)
 
         # 4. 连续被动后的转折点
         if (intent.strategy != GenerationStrategy.TEMPLATE
@@ -1182,7 +1523,7 @@ class TurnProcessorV2:
                     conditions_met += 1
                     matched_reasons.append("butterfly_impact")
             except Exception as e:
-                logger.debug("Butterfly pre-evaluation failed: %s", e)
+                logger.debug("Butterfly pre-evaluation failed: %s", e, exc_info=True)
                 self._pre_impact = None
 
         if conditions_met >= required_conditions:
@@ -1191,9 +1532,10 @@ class TurnProcessorV2:
         return False, ""
 
     def _generate_multi_agent(self, player_input, npc_names, fixed_prompt,
-                              scene_type=None, critical_reason: str = "") -> tuple:
+                              scene_type=None, critical_reason: str = "",
+                              time_anchor: str = "") -> tuple:
         """[v10+++] 多智能体分工叙事生成（Agents' Room 式）。
-        流程：情节架构师 → 角色审查员 → 对白撰写师。
+        流程：情节架构师 → 角色审查员 → 对话撰写师。
         失败时返回空叙事，由调用方回退到单 LLM。"""
         eng = self.engine
         narrative = ""
@@ -1204,7 +1546,10 @@ class TurnProcessorV2:
             return narrative, options, response
 
         # 构建上下文（截断尾部近期上下文，避免过长）
+        # [P3-A] 时间锚点放在 context 最前面，确保不被尾部截断丢失
         context = fixed_prompt[-2000:] if fixed_prompt else ""
+        if time_anchor:
+            context = time_anchor + "\n\n" + context
 
         # 构建角色信息与动态状态
         character_info = self._build_character_info(eng)
@@ -1232,7 +1577,7 @@ class TurnProcessorV2:
             )
             narrative = draft.final_narrative or ""
         except Exception as e:
-            logger.warning("Multi-agent narrative generation failed: %s", e)
+            logger.warning("Multi-agent narrative generation failed: %s", e, exc_info=True)
             narrative = ""
 
         if not narrative:
@@ -1368,7 +1713,7 @@ class TurnProcessorV2:
                     options=[],
                 )
         except Exception as e:
-            logger.warning("Failed to save state snapshot: %s", e)
+            logger.warning("Failed to save state snapshot: %s", e, exc_info=True)
 
     # 以下方法复用原有逻辑
     def _handle_dice(self, response):
@@ -1381,10 +1726,62 @@ class TurnProcessorV2:
             )
         return None
 
+    # ========== [Bug v9.1] 玩家输入时间跳跃预检测 ==========
+    # 时间词与场景词提取，用于在 AI 生成前注入 prompt
+    _TIME_WORD_PATTERN = re.compile(
+        r'(清晨|早上|早晨|上午|中午|下午|傍晚|黄昏|晚上|夜里|夜晚|黎明|拂晓|凌晨)'
+    )
+    _SCENE_PATTERN = re.compile(
+        r'(?:到了|回到|前往|进入|抵达|到达)\s*([\u4e00-\u9fff]{0,8}(?:工作室|家里|家中|住所|诊所|医院|学校|公司|店里|府上|宅子|房间|卧室|客厅))'
+    )
+
+    def _build_player_time_skip_hint(self, player_input: str) -> str:
+        """[Bug v9.1] 检测玩家输入中的明确时间跳跃，构造提示注入 prompt。
+
+        背景：v9 timekeeper 只在 AI 生成后解析时间跳跃，导致 AI 生成时 state 停留在旧时间，
+        结构化状态（current_time/location）反向注入 prompt 误导 AI 倒退时间线。
+        此方法在 AI 生成前只读检测玩家输入，把"剧情已推进到第二天上午/地点X"明确告诉 AI。
+        """
+        if not player_input:
+            return ""
+        parsed = parse_time_skip_from_text(player_input, world_type="custom")
+        days = parsed.get("days", 0)
+        if days <= 0:
+            return ""
+
+        # 提取时间词
+        time_word = ""
+        m = self._TIME_WORD_PATTERN.search(player_input)
+        if m:
+            time_word = m.group(1)
+
+        # 提取场景词（玩家输入里"到了工作室/回到家里"等）
+        scene_word = ""
+        sm = self._SCENE_PATTERN.search(player_input)
+        if sm:
+            scene_word = sm.group(1)
+
+        parts = ["【剧情时间推进 - 最高优先级】"]
+        parts.append(f"玩家输入明确表明剧情推进了 {days} 天。")
+        if time_word:
+            parts.append(f"当前叙事时间应为：第{days}天后的{time_word}。")
+        else:
+            parts.append(f"当前叙事时间应为：推进 {days} 天之后。")
+        if scene_word:
+            parts.append(f"当前场景应为：{scene_word}。")
+        parts.append("请在叙事中严格体现这一时间推进，不要回退到之前的时间点或场景。")
+        parts.append("绝对禁止把叙事写回推进前的时刻（如昨晚、电话挂断时等）。")
+        return "\n".join(parts)
+
     def _handle_time_perception(self, narrative, player_input):
         eng = self.engine
         time_skip_result = None
         year_evolution_events = []
+        # [Bug 修复] 时间跳跃功能已屏蔽：AI 时间标记和正则检测都容易误判，
+        # 导致玩家突然老死（创世神寿终正寝 bug）。改为只走正常时段推进，
+        # 闭关/数月后等叙事由 LLM 自然描写，不再自动推进游戏天数。
+        # 如需恢复，删除此 return 并启用下方逻辑。
+        return time_skip_result or {}, year_evolution_events
         if eng.timekeeper and eng.world_state and narrative:
             world_type = "custom"
             if eng.world_def:
@@ -1409,18 +1806,70 @@ class TurnProcessorV2:
                 )
             if time_skip_result.get("days_advanced", 0) > 0:
                 days_adv = time_skip_result["days_advanced"]
-                for _ in range(days_adv):
-                    eng.age_system.advance_time(eng.world_state, hours=24)
-                    if eng.world_state.current_day % 365 == 0:
-                        eng.timekeeper.mark_year_evolved()
-                        if eng.npc_life_evolution and eng.npc_states:
-                            locs = list(eng.world_state.locations.keys()) if eng.world_state.locations else []
-                            try:
-                                yr_events = eng.npc_life_evolution.evolve_year(eng.npc_states, eng.world_state, locs)
-                                if yr_events:
-                                    year_evolution_events.extend(yr_events)
-                            except Exception as e:
-                                logger.warning("evolve_year (time skip) failed: %s", e)
+                # [Bug 修复] 超龄保护：非不死角色跳跃后年龄不得超过 max_age - 5。
+                # 不死角色（创世神/不灭设定）跳过此检查，允许闭关几万年。
+                is_immortal = (eng.death_system._is_immortal(eng.player_state)
+                               if eng.death_system and eng.player_state else False)
+                if not is_immortal:
+                    _max_age = getattr(eng.player_state, 'max_age', 80) if eng.player_state else 80
+                    _cur_age = getattr(eng.player_state, 'age', 18) if eng.player_state else 18
+                    _safe_remaining_days = max(0, (_max_age - 5 - _cur_age) * 365)
+                    if days_adv > _safe_remaining_days:
+                        logger.warning(
+                            "时间跳跃 %d 天将导致玩家超龄（当前 %d 岁/上限 %d 岁），截断到 %d 天",
+                            days_adv, _cur_age, _max_age, _safe_remaining_days,
+                        )
+                        days_adv = _safe_remaining_days
+                else:
+                    logger.info("不死角色时间跳跃 %d 天（跳过超龄保护）", days_adv)
+                if days_adv > 0:
+                    # [Bug 修复] 大数字批量推进：闭关百年/千年逐天循环太慢，
+                    # 超过 1 年（365天）改为批量更新日期字段，仅按年触发 year_evolved。
+                    if days_adv <= 365:
+                        for _ in range(days_adv):
+                            # hours=6 推进 1 天（TIME_SLOTS 有 6 个时段），
+                            # 原代码 hours=24 会推进 4 天，导致时间跳跃被放大 4 倍。
+                            eng.age_system.advance_time(eng.world_state, hours=6)
+                            if eng.world_state.current_day % 365 == 0:
+                                eng.timekeeper.mark_year_evolved()
+                                if eng.npc_life_evolution and eng.npc_states:
+                                    locs = list(eng.world_state.locations.keys()) if eng.world_state.locations else []
+                                    try:
+                                        yr_events = eng.npc_life_evolution.evolve_year(eng.npc_states, eng.world_state, locs)
+                                        if yr_events:
+                                            year_evolution_events.extend(yr_events)
+                                    except Exception as e:
+                                        logger.warning("evolve_year (time skip) failed: %s", e, exc_info=True)
+                    else:
+                        # 批量推进：直接修改日期字段，按年触发演化
+                        old_day = eng.world_state.current_day
+                        eng.world_state.current_day += days_adv
+                        # 更新月/年（30天/月，12月/年，与 age_system.advance_time 一致）
+                        total_months = (eng.world_state.current_day - 1) // 30
+                        eng.world_state.current_day_of_month = (eng.world_state.current_day - 1) % 30 + 1
+                        eng.world_state.current_month = total_months % 12 + 1
+                        eng.world_state.current_year = total_months // 12 + 1
+                        if eng.world_state.era_name:
+                            eng.world_state.era_year = eng.world_state.current_year
+                        # 更新季节/天气
+                        eng.world_state.season = eng.age_system._get_season(eng.world_state.current_day)
+                        eng.world_state.weather = eng.age_system._roll_weather(eng.world_state.season)
+                        # 按年触发 year_evolved
+                        old_year = old_day // 365
+                        new_year = eng.world_state.current_day // 365
+                        if new_year > old_year:
+                            eng.timekeeper.mark_year_evolved()
+                            if eng.npc_life_evolution and eng.npc_states:
+                                locs = list(eng.world_state.locations.keys()) if eng.world_state.locations else []
+                                try:
+                                    yr_events = eng.npc_life_evolution.evolve_year(
+                                        eng.npc_states, eng.world_state, locs)
+                                    if yr_events:
+                                        year_evolution_events.extend(yr_events)
+                                except Exception as e:
+                                    logger.warning("evolve_year (batch time skip) failed: %s", e, exc_info=True)
+                        logger.info("批量时间跳跃 %d 天完成，当前第 %d 天",
+                                    days_adv, eng.world_state.current_day)
                 eng._last_year_evolved = eng.world_state.current_day
                 # [v10++] 时间跳跃后触发 NPC 反思（Generative Agents 式）
                 # 多天跳跃后，NPC 回顾近期记忆生成洞察；内部有节流，失败不影响主流程
@@ -1428,7 +1877,7 @@ class TurnProcessorV2:
                 try:
                     self._bg(eng.trigger_npc_reflection)
                 except Exception as e:
-                    logger.warning("NPC reflection after time skip failed: %s", e)
+                    logger.warning("NPC reflection after time skip failed: %s", e, exc_info=True)
         return time_skip_result, year_evolution_events
 
     def _handle_butterfly(self, player_input, narrative, response):
@@ -1523,7 +1972,7 @@ class TurnProcessorV2:
                             f"行为: {player_input[:50]} -> 影响: {impact.get('description', '')[:100]}"
                         )
             except Exception as e:
-                logger.warning("Butterfly async evaluation failed: %s", e)
+                logger.warning("Butterfly async evaluation failed: %s", e, exc_info=True)
 
         self._bg(_async_evaluate)
         # 返回空结果占位（蝴蝶效应在下回合生效）
@@ -1702,7 +2151,7 @@ class TurnProcessorV2:
                             npc.agent_id, relevant[0].skill_id, current_turn
                         )
             except Exception as e:
-                logger.warning("NPC %s 技能自学失败: %s", npc.name, e)
+                logger.warning("NPC %s 技能自学失败: %s", npc.name, e, exc_info=True)
 
     def _advance_task_board(self) -> dict:
         """[v10] 推进世界任务板"""
@@ -1738,7 +2187,7 @@ class TurnProcessorV2:
                     if evt_id:
                         self._processed_event_ids.add(evt_id)
                 except Exception as e:
-                    logger.warning("generate_tasks_from_event failed: %s", e)
+                    logger.warning("generate_tasks_from_event failed: %s", e, exc_info=True)
             # 清理过旧的事件 ID（保留最近 100 个）
             if len(self._processed_event_ids) > 100:
                 self._processed_event_ids = set(list(self._processed_event_ids)[-50:])
@@ -1797,7 +2246,7 @@ class TurnProcessorV2:
                     "impact_level": 3,
                 })
         except Exception as e:
-            logger.warning("Quest system advance failed: %s", e)
+            logger.warning("Quest system advance failed: %s", e, exc_info=True)
 
         return result
 
@@ -1833,14 +2282,53 @@ class TurnProcessorV2:
         try:
             self._run_narrative_review()
         except Exception as e:
-            logger.warning("Background narrative review failed: %s", e)
+            logger.warning("Background narrative review failed: %s", e, exc_info=True)
 
     def _run_memory_curator_sync(self):
         """[优化] 记忆 Curator 的同步包装，供后台异步队列调用"""
         try:
             self._run_memory_curator()
         except Exception as e:
-            logger.warning("Background memory curator failed: %s", e)
+            logger.warning("Background memory curator failed: %s", e, exc_info=True)
+
+    def _run_memory_brief_update_sync(self):
+        """[v1.3] MemoryBrief 更新的同步包装，供后台异步队列调用。
+        优先检测睡眠巩固（游戏日变更），否则检测增量更新（每8回合）。"""
+        try:
+            self._run_memory_brief_update()
+        except Exception as e:
+            logger.warning("Background memory brief update failed: %s", e, exc_info=True)
+
+    def _run_memory_brief_update(self) -> dict:
+        """[v1.3] 执行 MemoryBrief 增量更新或睡眠巩固"""
+        eng = self.engine
+        if not eng.memory_brief:
+            return {"skipped": True, "reason": "no_brief_manager"}
+
+        current_turn = eng.meta.current_turn if eng.meta else 0
+        current_day = eng.world_state.current_day if eng.world_state else 0
+
+        # 优先级 1：睡眠巩固（游戏日推进时全量重写）
+        try:
+            if eng.memory_brief.should_consolidate_on_sleep(current_day):
+                result = eng.memory_brief.consolidate_on_sleep(eng, current_day)
+                logger.info("MemoryBrief sleep consolidate on day %d: %s",
+                            current_day, result.get("updated", []))
+                return result
+        except Exception as e:
+            logger.warning("MemoryBrief sleep consolidate failed: %s", e, exc_info=True)
+
+        # 优先级 2：增量更新（每8回合刷新 active_threads + player_profile）
+        try:
+            if eng.memory_brief.should_incremental_update(current_turn):
+                result = eng.memory_brief.update_briefs_incremental(eng, current_turn)
+                logger.info("MemoryBrief incremental update on turn %d: %s",
+                            current_turn, result.get("updated", []))
+                return result
+        except Exception as e:
+            logger.warning("MemoryBrief incremental update failed: %s", e, exc_info=True)
+
+        return {"skipped": True, "reason": "not_time"}
 
     def _run_memory_curator(self) -> dict:
         """[v10] 执行记忆 Curator 整理"""
@@ -1984,6 +2472,21 @@ class TurnProcessorV2:
             burst = eng.foreshadow_lifecycle.check_burst()
             result["burst_check"] = burst
 
+        # [NovelRoleplay] 检查并失效既定未来伏笔（偏离度追踪）
+        if (hasattr(eng, 'butterfly') and eng.butterfly
+            and getattr(eng.butterfly, '_novel_mode', False)):
+            try:
+                invalidated = eng.butterfly.check_and_invalidate_future_foreshadows(
+                    eng.foreshadow_lifecycle, current_day
+                )
+                if invalidated:
+                    result["novel_divergence"] = {
+                        "invalidated_hooks": invalidated,
+                        "divergence_summary": eng.butterfly.get_divergence_summary(),
+                    }
+            except Exception as e:
+                logger.warning("[NovelRoleplay] 偏离度检查失败: %s", e, exc_info=True)
+
         return result
 
     def _run_continuity_audit(self) -> dict:
@@ -2018,7 +2521,7 @@ class TurnProcessorV2:
         try:
             self._run_continuity_audit()
         except Exception as e:
-            logger.warning("Background continuity audit failed: %s", e)
+            logger.warning("Background continuity audit failed: %s", e, exc_info=True)
 
     def _run_autonomous_memory(self) -> dict:
         """[v10++] 触发 Agent 自主记忆管理（MemGPT/Letta 式）。
@@ -2033,6 +2536,216 @@ class TurnProcessorV2:
         self._bg(eng.trigger_autonomous_memory)
         return {"scheduled": True}
 
+    def _check_personality_evolution(self, narrative: str):
+        """[v1.3] NPC 性格演化检测（后台异步执行）
+        按 check_interval_turns 周期执行，避免每回合都跑。
+        检测到创伤事件后由 LLM 生成新的性格描述。"""
+        try:
+            eng = self.engine
+            if not eng.npc_states or not narrative:
+                return
+            if not eng.meta or not eng.world_state:
+                return
+
+            # 从 engine 的 config 缓存读取周期配置
+            _cfg = eng._load_config() if hasattr(eng, '_load_config') else {}
+            _feat_cfg = _cfg.get("features", {}).get("npc_personality_evolution", {})
+            if not _feat_cfg.get("enabled", True):
+                return
+            try:
+                interval = int(_feat_cfg.get("check_interval_turns", 5))
+            except Exception:
+                interval = 5
+            if interval <= 0:
+                interval = 5
+
+            current_turn = eng.meta.current_turn
+            # 周期检查：每 N 回合执行一次
+            if current_turn % interval != 0:
+                return
+
+            current_day = eng.world_state.current_day
+
+            # 世界背景（用于让 LLM 生成更贴合的叙事）
+            world_context = ""
+            if eng.world_state:
+                world_context = f"世界：{eng.world_state.world_name or ''}\n"
+                if eng.world_state.description:
+                    world_context += f"背景：{eng.world_state.description[:200]}"
+
+            # 批量检测
+            from modules.personality_evolution import batch_check_npcs
+            shifts = batch_check_npcs(
+                eng.npc_states,
+                narrative,
+                current_turn,
+                current_day,
+                llm=eng.llm,
+                world_context=world_context,
+            )
+
+            if shifts:
+                logger.info(
+                    "[PersonalityEvolution] 本回合 %d 个 NPC 发生性格转折",
+                    len(shifts)
+                )
+                # 把转折叙事写入 narrative_history（让玩家可见）
+                for shift in shifts:
+                    narrative_text = shift.get("narrative", "")
+                    if narrative_text and hasattr(eng, 'narrative_history'):
+                        try:
+                            eng.narrative_history.append({
+                                "type": "personality_shift",
+                                "day": current_day,
+                                "time": getattr(eng.world_state, 'current_time', ''),
+                                "text": f"【{shift.get('trauma', '性格转折')}】{narrative_text}",
+                                "event_type": "personality_shift",
+                                "npc_name": shift.get("npc_name", ""),
+                            })
+                        except Exception:
+                            pass
+        except Exception as e:
+            logger.warning("[PersonalityEvolution] 检测失败: %s", e, exc_info=True)
+
+    def _record_causal_node(
+        self,
+        player_input: str,
+        narrative: str,
+        rule_result,
+        impact: dict | None,
+        world_event: dict | None,
+    ):
+        """[v1.3] 因果链节点记录（后台异步执行）
+
+        综合本回合的多维度信号计算重要性，超阈值则写入 eng.causal_graph。
+        - 重要性维度：蝴蝶效应分、规则效果数、NPC 参与数、性格转折、伏笔、文本长度
+        - parent_turn_ids：暂不主动建立，依赖前端从 triggered_events 反推
+        """
+        try:
+            eng = self.engine
+            if not eng.causal_graph:
+                return
+            if not eng.meta or not eng.world_state:
+                return
+
+            # 从 engine 的 config 缓存读取开关
+            _cfg = eng._load_config() if hasattr(eng, '_load_config') else {}
+            from modules.causal_graph import (
+                compute_importance, build_effects_summary,
+                is_feature_enabled, get_min_importance, CausalNode,
+            )
+            if not is_feature_enabled(_cfg):
+                return
+
+            # 动态同步阈值（用户可能在设置中调整过）
+            new_threshold = get_min_importance(_cfg)
+            if new_threshold != eng.causal_graph.min_importance:
+                eng.causal_graph.min_importance = new_threshold
+
+            # 收集信号
+            rule_effects_count = 0
+            try:
+                rule_effects_count = len(rule_result.effects) if rule_result and rule_result.effects else 0
+            except Exception:
+                rule_effects_count = 0
+
+            # 涉及 NPC 数：从叙事中匹配 NPC 名字
+            involved_npc_names = []
+            if eng.npc_states:
+                for npc in eng.npc_states.values():
+                    if npc.name and npc.name in (narrative or ""):
+                        involved_npc_names.append(npc.name)
+            involved_npc_count = len(involved_npc_names)
+
+            # 蝴蝶效应分
+            butterfly_score = 0.0
+            if impact and isinstance(impact, dict):
+                try:
+                    butterfly_score = float(impact.get("impact_score", 0) or 0)
+                except Exception:
+                    butterfly_score = 0.0
+
+            # 小说模式偏离度
+            novel_divergence = 0.0
+            if getattr(eng, 'is_novel_roleplay', False) and eng.butterfly:
+                try:
+                    novel_divergence = float(getattr(eng.butterfly, 'novel_divergence_score', 0.0) or 0.0)
+                except Exception:
+                    novel_divergence = 0.0
+
+            # [Bug fix] 检测本回合叙事中的性格转折事件（不依赖 narrative_history，避免误报上回合事件）
+            has_personality_shift = False
+            try:
+                from modules.personality_evolution import detect_trauma_events
+                if eng.npc_states and narrative:
+                    for npc in eng.npc_states.values():
+                        if not npc.name or len(npc.name) < 2:
+                            continue
+                        trauma_events = detect_trauma_events(narrative, npc.name)
+                        if trauma_events:
+                            has_personality_shift = True
+                            break
+            except Exception:
+                pass
+
+            # 伏笔检测
+            has_foreshadow = False
+            try:
+                if world_event and isinstance(world_event, dict):
+                    et = world_event.get("event_type", "")
+                    if "foreshadow" in et or "伏笔" in (world_event.get("narrative", "") or ""):
+                        has_foreshadow = True
+            except Exception:
+                pass
+
+            # 计算重要性（蝴蝶效应分和小说偏离度分开传入，量纲不同）
+            importance, triggered_events = compute_importance(
+                turn_id=eng.meta.current_turn,
+                player_input=player_input,
+                narrative=narrative,
+                rule_effects_count=rule_effects_count,
+                involved_npc_count=involved_npc_count,
+                butterfly_score=butterfly_score,
+                novel_divergence=novel_divergence,
+                triggered_events=[],
+                has_personality_shift=has_personality_shift,
+                has_foreshadow=has_foreshadow,
+            )
+
+            # 后果摘要
+            butterfly_narrative = ""
+            if world_event and isinstance(world_event, dict):
+                butterfly_narrative = world_event.get("narrative", "") or world_event.get("description", "")
+            effects_summary = build_effects_summary(
+                player_input=player_input,
+                narrative=narrative,
+                rule_effects_count=rule_effects_count,
+                npc_names=involved_npc_names,
+                butterfly_narrative=butterfly_narrative,
+            )
+
+            # 构造节点
+            node = CausalNode(
+                turn_id=eng.meta.current_turn,
+                day=eng.world_state.current_day,
+                player_input=player_input,
+                narrative=narrative,
+                importance=importance,
+                triggered_events=triggered_events,
+                effects_summary=effects_summary,
+                parent_turn_ids=[],  # 暂不主动建立依赖；可后续扩展
+                novel_divergence=novel_divergence,
+            )
+
+            added = eng.causal_graph.add_node(node)
+            if added:
+                logger.debug(
+                    "[CausalGraph] 记录回合 T%d 重要性=%.2f 事件=%s",
+                    node.turn_id, node.importance, node.triggered_events
+                )
+        except Exception as e:
+            logger.warning("[CausalGraph] 记录失败: %s", e, exc_info=True)
+
     def _build_graph_rag(self, narrative):
         eng = self.engine
         if eng.graph_rag and narrative:
@@ -2041,7 +2754,7 @@ class TurnProcessorV2:
                 turn = eng.meta.current_turn if eng.meta else 0
                 eng.graph_rag.build_from_narrative(narrative, day=day, turn=turn)
             except Exception as e:
-                logger.warning("GraphRAG build failed: %s", e)
+                logger.warning("GraphRAG build failed: %s", e, exc_info=True)
 
     # ── [v10++] 角色动态状态（CHIRON 式） ─────────────────
 
@@ -2073,19 +2786,26 @@ class TurnProcessorV2:
 
     def _detect_scene_type(self, eng, player_input: str, fixed_prompt: str = ""):
         """[v10+] 检测当前场景类型。
-        综合玩家输入和当前上下文（fixed_prompt 摘要）进行关键词匹配。
+        综合玩家输入和最近一段剧情进行关键词匹配。
         SceneDetector 不可用时返回 None，调用方回退到默认检索权重。
+
+        [Bug 修复] 原实现拼接 fixed_prompt[-500:] 作为上下文摘要，但 fixed_prompt
+        含世界观/规则/记忆/伏笔/角色状态等大量与场景无关的文本，SceneDetector 用
+        子串匹配（如 "想"/"心"/"情"/"爱" 等单字）会被误判为 INTROSPECTIVE 场景，
+        导致 _build_scene_hint 注入"节奏舒缓，注重内心活动"的错误提示，使 LLM
+        完全不响应玩家动作（如"召唤四大宫主"被识别成内省，AI 改写为"整理物品"）。
+        现改为只用玩家输入 + 上一段叙事，精准反映"当前正在发生什么场景"。
         """
         if not eng.scene_detector:
             return None
         try:
-            # 拼接玩家输入与上下文摘要，提升检测准确性
-            # fixed_prompt 可能很长，只取尾部近期上下文作为检测素材
-            context_snippet = fixed_prompt[-500:] if fixed_prompt else ""
-            detect_text = f"{player_input}\n{context_snippet}"
+            recent_narrative = ""
+            if eng.narrative_history:
+                recent_narrative = (eng.narrative_history[-1].get("text", "") or "")[-300:]
+            detect_text = f"{player_input}\n{recent_narrative}"
             return eng.scene_detector.detect(detect_text)
         except Exception as e:
-            logger.warning("Scene detection failed: %s", e)
+            logger.warning("Scene detection failed: %s", e, exc_info=True)
             return None
 
     def _build_scene_hint(self, scene_result) -> str:
@@ -2129,7 +2849,7 @@ class TurnProcessorV2:
                     eng.player_state.agent_id, narrative, current_turn, current_day
                 )
             except Exception as e:
-                logger.warning("Player dynamic state analysis failed: %s", e)
+                logger.warning("Player dynamic state analysis failed: %s", e, exc_info=True)
 
         # 分析叙事中提及的 NPC 状态变化
         if eng.npc_states:
@@ -2142,7 +2862,7 @@ class TurnProcessorV2:
                         npc_id, narrative, current_turn, current_day
                     )
                 except Exception as e:
-                    logger.warning("NPC %s dynamic state analysis failed: %s", npc.name, e)
+                    logger.warning("NPC %s dynamic state analysis failed: %s", npc.name, e, exc_info=True)
 
     def _run_identity_audit(self, narrative):
         eng = self.engine
@@ -2167,7 +2887,7 @@ class TurnProcessorV2:
                             if eng.lorebook:
                                 eng.lorebook.update_npc_entry(matched_npc.name, matched_npc.get_identity_summary())
             except Exception as e:
-                logger.warning("Identity audit failed: %s", e)
+                logger.warning("Identity audit failed: %s", e, exc_info=True)
         return audit_results
 
     def _handle_experience(self, player_input, narrative):
@@ -2224,9 +2944,18 @@ class TurnProcessorV2:
 
     # [v12] AI时间跳跃标记提取与清除
     _TIME_SKIP_PATTERN = re.compile(r'<!--\s*TIME_SKIP\s*:\s*(\d+)\s*-->')
+    # [Bug 修复] 单次时间跳跃上限：防 LLM 极端幻觉（如 99999999）。
+    # 设为 1 万年（3650000 天），兼容修仙闭关几万年的叙事需求，
+    # 同时拦住明显的荒谬数字。超龄保护和不死标签另行处理真实寿命约束。
+    _MAX_TIME_SKIP_DAYS = 3650000
 
     def _extract_time_skip_tag(self, text):
-        """[v12] 从叙事文本中提取AI时间跳跃标记，返回天数（int或None）"""
+        """[v12] 从叙事文本中提取AI时间跳跃标记，返回天数（int或None）
+
+        [Bug 修复] 加上限校验：LLM 幻觉可能输出 TIME_SKIP: 99999999 之类荒谬数字。
+        上限设为 1 万年（兼容修仙闭关），超过视为幻觉截断并记 warning。
+        真正的寿命约束由超龄保护 + death_system 不死标签处理。
+        """
         if not text:
             return None
         m = self._TIME_SKIP_PATTERN.search(text)
@@ -2234,6 +2963,12 @@ class TurnProcessorV2:
             try:
                 days = int(m.group(1))
                 if days > 0:
+                    if days > self._MAX_TIME_SKIP_DAYS:
+                        logger.warning(
+                            "[v12] AI时间跳跃标记 %d 天超过上限 %d，截断（疑似LLM幻觉）",
+                            days, self._MAX_TIME_SKIP_DAYS,
+                        )
+                        days = self._MAX_TIME_SKIP_DAYS
                     logger.info("[v12] 检测到AI时间跳跃标记: +%d天", days)
                     return days
             except ValueError:
@@ -2263,4 +2998,4 @@ class TurnProcessorV2:
                 logger.info("Summary generated (history preserved): %d entries",
                             len(eng.narrative_history))
             except Exception as e:
-                logger.warning("Summary generation failed: %s", e)
+                logger.warning("Summary generation failed: %s", e, exc_info=True)

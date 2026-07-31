@@ -1,6 +1,7 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Generator
 
 @dataclass
 class LLMUsageStats:
@@ -71,7 +72,8 @@ class BaseLLM(ABC):
         ...
 
     @abstractmethod
-    def chat_json(self, prompt: str, temperature: float = 0.5, max_tokens: int = 4096) -> dict:
+    def chat_json(self, prompt: str, temperature: float = 0.5, max_tokens: int = 4096,
+                  schema_hint: str = "") -> dict:
         ...
 
     @abstractmethod
@@ -79,30 +81,41 @@ class BaseLLM(ABC):
         ...
 
     @abstractmethod
-    async def achat_json(self, prompt: str, temperature: float = 0.5, max_tokens: int = 4096) -> dict:
+    async def achat_json(self, prompt: str, temperature: float = 0.5, max_tokens: int = 4096,
+                         schema_hint: str = "") -> dict:
         ...
 
     def chat_json_from_messages(self, messages: list[dict],
                                 temperature: float = 0.5,
-                                max_tokens: int = 4096) -> dict:
-        """从消息列表生成 JSON 响应（子类可覆盖以原生支持多轮消息）"""
+                                max_tokens: int = 4096,
+                                **kwargs) -> dict:
+        """从消息列表生成 JSON 响应（子类可覆盖以原生支持多轮消息）
+
+        [Bug 修复] 接受 **kwargs（如 retries/narrative_hint/task_type），
+        避免 Router 调用时因 BaseLLM 默认实现不认识这些参数而报错。
+        默认实现回退到 chat_json，忽略 kwargs。
+        """
         # [Bug#14] 回退到 chat_json 而非抛 NotImplementedError，
-        # 避免 Router 的 hasattr 检查通过但调用时崩溃
+        # 避免 Router/TaskBoundLLM 的 hasattr 检查通过但调用时崩溃
         prompt = "\n".join(f"[{m.get('role','user')}]: {m.get('content','')}" for m in messages)
         return self.chat_json(prompt, temperature=temperature, max_tokens=max_tokens)
 
     def chat_structured(self, prompt: str, schema_name: str,
-                        temperature: float = 0.7, max_tokens: int = 2048) -> dict:
+                        temperature: float = 0.7, max_tokens: int = 2048,
+                        **kwargs) -> dict:
         """
         结构化输出：使用 JSON Schema 约束 LLM 输出。
 
         子类可覆盖以原生支持 response_format 参数。
         默认实现回退到 chat_json，保持向后兼容。
+
+        [Bug 修复] 接受 **kwargs（如 narrative_hint/task_type），
+        避免 Router 调用时因 BaseLLM 默认实现不认识这些参数而报错。
         """
         return self.chat_json(prompt, temperature=temperature, max_tokens=max_tokens)
 
     def chat_stream(self, prompt: str, temperature: float = 0.8,
-                    max_tokens: int = 4096):
+                    max_tokens: int = 4096) -> "Generator[str, None, None]":
         """流式生成文本，返回生成器逐 token yield（子类可覆盖）"""
         # [Bug#14] 回退到 chat 而非抛 NotImplementedError，
         # 避免 Router/TaskBoundLLM 的 hasattr 检查通过但调用时崩溃
@@ -112,9 +125,9 @@ class BaseLLM(ABC):
     def get_stats(self) -> dict:
         return self.stats.to_dict()
 
-    def reset_stats(self):
+    def reset_stats(self) -> None:
         self.stats = LLMUsageStats()
 
-    def close(self):
+    def close(self) -> None:
         """[Bug] 关闭底层连接池，子类应覆盖以释放 httpx 客户端"""
         pass

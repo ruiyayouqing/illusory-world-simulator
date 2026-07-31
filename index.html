@@ -8,11 +8,11 @@
      In Alpine v3.15+, alpine:init fires synchronously during Alpine.start()
      which runs immediately after the Alpine script executes (defer order is
      preserved, but the listener must exist before the event is dispatched). -->
-<script defer src="/js/alpine-components.js?v=10"></script>
+<script defer src="/js/alpine-components.js?v=c605ab10"></script>
 <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
 <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
 <title>太虚幻境 - 虚拟世界人生模拟器</title>
-<link rel="stylesheet" href="/css/style.css?v=22">
+<link rel="stylesheet" href="/css/style.css?v=2faf9722">
 <style>
 .toast-success { background: linear-gradient(135deg, rgba(46,125,50,0.95), rgba(56,142,60,0.95)); color: white; }
 .toast-error { background: linear-gradient(135deg, rgba(198,40,40,0.95), rgba(211,47,47,0.95)); color: white; }
@@ -137,6 +137,10 @@
   <div class="gold-fg">
     <label class="gold-fg-label">描述你想要的世界</label>
     <textarea id="wd" class="gold-textarea" placeholder="✒ 例：穿越到明朝永乐年间，成为落魄书生" rows="3"></textarea>
+    <div style="margin-top:6px;color:var(--dim);font-size:.82em;line-height:1.6">
+      如不填写，AI世界观可随机生成世界<br>
+      可简单填写，AI世界观可根据你的填写，生成完善的世界
+    </div>
     <div style="margin-top:10px;display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap">
       <button onclick="try{openWorldviewModal()}catch(e){alert('Error: '+e.message)}" class="gold-btn-outline gold-btn-outline-blue">🧠 AI世界观（可选）</button>
       <button onclick="showPresetWorlds()" class="gold-btn-outline">📋 预设开局</button>
@@ -159,7 +163,7 @@
   <div class="gold-hint" style="margin-top:8px">上传世界书后，生成的世界将遵循世界书设定。支持 SillyTavern World Info 格式。</div>
 </div>
 
-<button class="gold-btn-primary" onclick="createWorld()">✦ 生成世界并开始冒险</button>
+<button class="gold-btn-primary" id="createWorldBtn" onclick="createWorld()">✦ 生成世界并开始冒险</button>
 </div>
 
 <!-- 加载存档页面 -->
@@ -319,6 +323,18 @@
 <div class="sidebar-btn" onclick="doGraph()" title="关系">
 🔗<span class="tooltip">关系图谱</span>
 </div>
+<div class="sidebar-btn" onclick="openFactionModal()" title="势力图">
+⚑<span class="tooltip">势力图</span>
+</div>
+<div class="sidebar-btn" onclick="openRetrievalModal()" title="检索调试">
+🔍<span class="tooltip">检索调试</span>
+</div>
+<div class="sidebar-btn" onclick="openMemoryModal()" title="记忆面板">
+🧠<span class="tooltip">长期记忆</span>
+</div>
+<div class="sidebar-btn" onclick="openEmotionModal()" title="情感面板">
+💖<span class="tooltip">情感记忆</span>
+</div>
 <div class="sidebar-btn" onclick="openWhoIsWho()" title="名人谱">
 📜<span class="tooltip">名人谱</span>
 </div>
@@ -332,7 +348,7 @@
 <div class="sidebar-btn" onclick="doMemoir()" title="回忆录">
 📖<span class="tooltip">回忆录</span>
 </div>
-<div class="sidebar-btn" onclick="doNovel()" title="小说">
+<div class="sidebar-btn" onclick="doNovel()" title="小说" style="display:none">
 📚<span class="tooltip">生成小说</span>
 </div>
 <div class="sidebar-btn" onclick="doImage()" title="插图">
@@ -452,11 +468,31 @@
 
 <div class="sec" id="news_sec"><h3>📰 世界新闻 <span id="news_count" style="color:var(--dim);font-size:.8em"></span></h3><div class="news-feed" id="news_feed"><div style="color:var(--dim);text-align:center;padding:10px;font-size:.8em">暂无新闻</div></div><div class="news-expand" id="news_expand" style="display:none" onclick="toggleNewsExpand()">查看更多历史新闻 ▼</div></div>
 
+<!-- [v1.6] 江湖见闻：NPC 之间的对话传闻 -->
+<div class="sec" id="rumor_sec"><h3>👂 江湖见闻 <span id="rumor_count" style="color:var(--dim);font-size:.8em"></span> <span class="refresh-btn" onclick="refreshRumors()" style="float:right;cursor:pointer;color:var(--accent);font-size:.85em" title="刷新">⟳</span></h3><div class="rumor-feed" id="rumor_feed"><div style="color:var(--dim);text-align:center;padding:10px;font-size:.8em">江湖风平浪静，暂无见闻...</div></div></div>
+
+<!-- [v1.6] 思维树：NPC 分支规划可视化 -->
+<div class="sec" id="planner_sec">
+  <h3>🌳 思维树 <span id="planner_status" style="color:var(--dim);font-size:.8em"></span>
+    <span class="refresh-btn" onclick="refreshPlannerPanel()" style="float:right;cursor:pointer;color:var(--accent);font-size:.85em" title="刷新">⟳</span>
+  </h3>
+  <div class="planner-npc-select">
+    <select id="planner_npc_select" onchange="onPlannerNpcSelect()" class="planner-select">
+      <option value="">选择 NPC...</option>
+    </select>
+    <button onclick="triggerPreplan()" class="planner-preplan-btn" title="对活跃NPC批量预规划">⚡ 预规划</button>
+  </div>
+  <div id="planner_tree_canvas" class="planner-tree-canvas"></div>
+  <div id="planner_detail" class="planner-detail">
+    <div style="color:var(--dim);text-align:center;padding:14px;font-size:1em;line-height:1.6">请先点击"预规划"，稍等片刻后可选择 NPC 查看其思维树</div>
+  </div>
+</div>
+
 <div class="sec"><h3>⚡ 快捷操作</h3>
 <div class="abtns">
-<div class="abtn" onclick="doWhispers()">💭 脑内碎碎念</div>
+<div class="abtn" id="btn_whispers" onclick="doWhispers()">💭 脑内碎碎念</div>
 <div class="abtn" onclick="doMarket()" style="display:none">💰 市场行情</div>
-<div class="abtn" onclick="doViewChapters()">📑 查看小说</div>
+<div class="abtn" onclick="doViewChapters()" style="display:none">📑 查看小说</div>
 <div class="abtn" onclick="doButterfly()">🦋 蝴蝶效应</div>
 <div class="abtn" onclick="openAddNpc()">➕ 添加角色</div>
 <div class="abtn" onclick="openEditNpc()">✏️ 修改角色</div>
@@ -488,6 +524,8 @@
   <div class="settings-tab" data-tab="advanced" onclick="switchSettingsTab('advanced')">🔧 高级</div>
 </div>
 
+<!-- 设置内容滚动区 -->
+<div class="settings-modal-body">
 <!-- 🤖 AI模型 标签页 -->
 <div id="tab-ai" class="settings-tab-content active">
   <!-- 🧠 主力模型 -->
@@ -587,6 +625,17 @@
     <div id="test_result_embedding" style="font-size:.8em;margin-top:6px;display:none;padding:8px 10px;border-radius:6px"></div>
     <div style="font-size:.78em;color:var(--dim);margin-top:8px;padding:8px 10px;background:rgba(212,175,55,.05);border-radius:6px">💡 用于记忆语义检索，推荐 BAAI/bge-m3（中英文双语，1024维）</div>
   </div>
+
+  <!-- 🧹 清除所有 KEY（共享分发用） -->
+  <div class="settings-section" style="border:1px dashed rgba(198,40,40,.35);background:rgba(198,40,40,.04)">
+    <div class="settings-section-title" style="color:#e07a7a">🧹 清除所有模型 KEY</div>
+    <div style="font-size:.82em;color:var(--dim);margin-bottom:10px;line-height:1.6">
+      一键清除全部 5 个模型（主力/备用/对话/文生图/向量）的 API Key，同时清除已保存的配置档案中的 Key。<br>
+      其他设置（调用地址、模型名、参数等）保留不变。适合在共享或分发软件前清理敏感信息。
+    </div>
+    <button onclick="clearAllKeys()" id="btn_clear_all_keys" style="padding:9px 18px;background:rgba(198,40,40,.18);border:1px solid rgba(198,40,40,.5);border-radius:8px;color:#e07a7a;font-size:.88em;cursor:pointer;white-space:nowrap">🧹 清除所有 KEY</button>
+    <div id="clear_keys_result" style="font-size:.8em;margin-top:8px;display:none;padding:8px 10px;border-radius:6px"></div>
+  </div>
 </div>
 
 <!-- ✍️ 叙事 标签页 -->
@@ -602,6 +651,7 @@
         <option value="严肃文学">严肃文学 — 冷峻克制，余华/莫言风格</option>
         <option value="网文爽文">网文爽文 — 快节奏，爽点密集</option>
         <option value="诗化散文">诗化散文 — 意境优先，诗意优美</option>
+        <option value="真人作者">真人作者 — 对话驱动，多视角信息差</option>
         <option value="自定义">✏️ 自定义风格...</option>
       </select>
     </div>
@@ -877,8 +927,9 @@
   </div>
 </div>
 
-<!-- 底部保存按钮 -->
-<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+<!-- 底部保存按钮（固定在面板底部，不随内容滚动） -->
+</div><!-- /.settings-modal-body -->
+<div class="settings-save-bar" style="padding-top:16px;border-top:1px solid var(--border)">
   <button class="btn" onclick="saveSettings()" style="width:100%;padding:12px">
     💾 保存设置
   </button>
@@ -924,6 +975,160 @@
 <div class="graph-legend"><span><span class="dot" style="background:var(--gold);box-shadow:0 0 8px rgba(212,175,55,.5)"></span>玩家</span><span><span class="dot" style="background:var(--accent-blue)"></span>NPC</span><span><span class="dot" style="background:var(--accent-green)"></span>友好</span><span><span class="dot" style="background:var(--accent-red)"></span>敌对</span></div>
 <div id="graphCanvas"></div>
 <div id="graphInfo" style="margin-top:12px;font-size:.85em;color:var(--dim)"></div></div></div>
+
+<!-- [v1.6 P1-4] 势力图 modal：GraphRAG 社区检测可视化 -->
+<div class="modal" id="factionModal"><div class="modal-box" style="width:1080px;max-width:96vw;height:88vh;display:flex;flex-direction:column;padding:20px 24px;overflow:hidden"><span class="close" onclick="closeFactionModal()">&times;</span>
+<h2 style="margin:0 0 8px 0;flex-shrink:0">⚑ 势力图 <span id="faction_status" style="color:var(--dim);font-size:.7em"></span></h2>
+<div class="faction-controls" style="flex-shrink:0;display:flex;gap:14px;align-items:center;margin-bottom:8px">
+  <label style="font-size:.8em;color:var(--dim)">算法:
+    <select id="faction_method" onchange="onFactionMethodChange()" class="planner-select" style="width:auto;display:inline-block;margin-left:4px">
+      <option value="louvain">Louvain（推荐）</option>
+      <option value="label_propagation">标签传播</option>
+      <option value="greedy">贪心模块度</option>
+    </select>
+  </label>
+  <label style="font-size:.8em;color:var(--dim);cursor:pointer">
+    <input type="checkbox" id="faction_active_only" checked onchange="onFactionActiveOnlyChange()" style="vertical-align:middle">
+    仅基于有效关系
+  </label>
+  <span class="refresh-btn" onclick="refreshFactionPanel(true)" style="cursor:pointer;color:var(--accent);font-size:.85em" title="刷新">⟳ 刷新</span>
+</div>
+<div id="faction_stats" class="faction-stats-wrap" style="flex-shrink:0;margin-bottom:8px"></div>
+<div style="flex:1;display:flex;gap:14px;min-height:0">
+  <div id="faction_canvas" style="flex:1;background:rgba(0,0,0,0.15);border:1px solid var(--border);border-radius:6px;overflow:hidden;min-width:0"></div>
+  <div id="faction_list" class="faction-list-wrap" style="width:280px;flex-shrink:0;overflow-y:auto;padding-right:4px"></div>
+</div>
+<div style="flex-shrink:0;margin-top:8px;font-size:.78em;color:var(--dim);display:flex;gap:18px;align-items:center">
+  <span><span style="display:inline-block;width:10px;height:10px;background:var(--gold);border-radius:2px;vertical-align:middle;margin-right:4px"></span>同势力关系</span>
+  <span><span style="display:inline-block;width:10px;height:2px;background:var(--accent-purple);vertical-align:middle;margin-right:4px;border-top:1px dashed var(--accent-purple)"></span>跨势力关系</span>
+  <span>◆ 首领</span>
+  <span style="margin-left:auto;color:var(--dim)">提示：点击节点高亮其势力</span>
+</div>
+</div></div>
+
+<!-- [v1.6 P1-5] 检索调试模态：CRAG + HyDE 审计日志 -->
+<div class="modal" id="retrievalModal"><div class="modal-box" style="width:1080px;max-width:96vw;height:88vh;display:flex;flex-direction:column;padding:20px 24px;overflow:hidden"><span class="close" onclick="closeRetrievalModal()">&times;</span>
+<h2 style="margin:0 0 8px 0;flex-shrink:0">🔍 检索调试 <span style="color:var(--dim);font-size:.7em">CRAG + HyDE 审计日志</span></h2>
+
+<div style="flex-shrink:0;display:flex;gap:14px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+  <button class="btn-mini" id="retrieval_debug_btn" onclick="toggleRetrievalDebug()" style="padding:6px 14px;font-size:.85em;cursor:pointer;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text)">开启调试</button>
+  <button class="btn-mini" onclick="clearRetrievalAudit()" style="padding:6px 14px;font-size:.85em;cursor:pointer;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text)">清空日志</button>
+  <button class="btn-mini" id="retrieval_autorefresh_btn" onclick="toggleRetrievalAutoRefresh()" style="padding:6px 14px;font-size:.85em;cursor:pointer;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text)">自动刷新</button>
+  <span class="refresh-btn" onclick="refreshRetrievalAudit(true)" style="cursor:pointer;color:var(--accent);font-size:.85em" title="手动刷新">⟳ 刷新</span>
+</div>
+
+<div id="retrieval_stats" class="ret-stats-wrap" style="flex-shrink:0;margin-bottom:8px"></div>
+
+<div style="flex-shrink:0;margin-bottom:8px;padding:10px;background:rgba(212,175,55,0.04);border:1px solid var(--border);border-radius:6px">
+  <div style="font-size:.85em;color:var(--dim);margin-bottom:6px">检索测试（执行一次 CRAG+HyDE 管道）：</div>
+  <div style="display:flex;gap:8px">
+    <input type="text" id="retrieval_test_query" placeholder="输入测试查询，如：他在哪里遇到了张三？" style="flex:1;padding:8px;background:var(--panel-light);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:.85em">
+    <button onclick="testRetrieval()" style="padding:8px 16px;font-size:.85em;cursor:pointer;background:linear-gradient(135deg,var(--gold-dark),var(--gold));border:none;border-radius:4px;color:#0d0c0f;font-weight:600">测试</button>
+  </div>
+  <div id="retrieval_test_result" style="margin-top:8px;max-height:200px;overflow-y:auto"></div>
+</div>
+
+<div id="retrieval_audit_list" style="flex:1;overflow-y:auto;padding-right:4px;font-size:.85em"></div>
+
+<div style="flex-shrink:0;margin-top:8px;font-size:.78em;color:var(--dim);display:flex;gap:18px;align-items:center">
+  <span><span style="display:inline-block;width:10px;height:10px;background:var(--accent-green);border-radius:2px;vertical-align:middle;margin-right:4px"></span>高相关 (≥0.55)</span>
+  <span><span style="display:inline-block;width:10px;height:10px;background:var(--gold);border-radius:2px;vertical-align:middle;margin-right:4px"></span>中相关 (≥0.25)</span>
+  <span><span style="display:inline-block;width:10px;height:10px;background:var(--accent-red);border-radius:2px;vertical-align:middle;margin-right:4px"></span>低相关 (&lt;0.25)</span>
+  <span style="margin-left:auto;color:var(--dim)">点击条目展开详情</span>
+</div>
+</div></div>
+
+<div class="modal" id="memoryModal"><div class="modal-box" style="width:1080px;max-width:96vw;height:88vh;display:flex;flex-direction:column;padding:20px 24px;overflow:hidden"><span class="close" onclick="closeMemoryModal()">&times;</span>
+<h2 style="margin:0 0 8px 0;flex-shrink:0">🧠 长期记忆 <span style="color:var(--dim);font-size:.7em">L1日常 / L2周期 / L3里程碑 + 审计日志</span></h2>
+
+<div style="flex-shrink:0;display:flex;gap:14px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+  <button class="btn-mini" id="memory_audit_btn" onclick="toggleMemoryAudit()" style="padding:6px 14px;font-size:.85em;cursor:pointer;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text)">关闭审计</button>
+  <button class="btn-mini" onclick="clearMemoryAudit()" style="padding:6px 14px;font-size:.85em;cursor:pointer;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text)">清空日志</button>
+  <button class="btn-mini" id="memory_autorefresh_btn" onclick="toggleMemoryAutoRefresh()" style="padding:6px 14px;font-size:.85em;cursor:pointer;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text)">自动刷新</button>
+  <span class="refresh-btn" onclick="refreshMemoryPanel(true)" style="cursor:pointer;color:var(--accent);font-size:.85em" title="手动刷新">⟳ 刷新</span>
+  <span style="margin-left:auto;font-size:.78em;color:var(--dim)">总览 ↑ / 摘要列表 ↓ / 审计日志 ↓</span>
+</div>
+
+<div id="memory_overview" class="mem-overview-wrap" style="flex-shrink:0;margin-bottom:8px"></div>
+
+<div style="flex-shrink:0;display:flex;gap:10px;margin-bottom:8px;align-items:center">
+  <span style="font-size:.82em;color:var(--dim);white-space:nowrap">级别筛选：</span>
+  <button class="mem-filter-btn active" data-level="" onclick="setMemoryFilter('')">全部</button>
+  <button class="mem-filter-btn" data-level="L1" onclick="setMemoryFilter('L1')">L1 日常</button>
+  <button class="mem-filter-btn" data-level="L2" onclick="setMemoryFilter('L2')">L2 周期</button>
+  <button class="mem-filter-btn" data-level="L3" onclick="setMemoryFilter('L3')">L3 里程碑</button>
+  <span style="margin-left:auto;font-size:.78em;color:var(--dim)" id="memory_summary_count"></span>
+</div>
+
+<div id="memory_summary_list" style="flex:1;overflow-y:auto;padding-right:4px;font-size:.85em;min-height:120px;border-bottom:1px solid var(--border);padding-bottom:8px"></div>
+
+<div style="flex-shrink:0;margin-top:10px;display:flex;gap:10px;align-items:center">
+  <span style="font-size:.85em;color:var(--accent);font-weight:600">📋 审计日志</span>
+  <span style="font-size:.78em;color:var(--dim)" id="memory_audit_count"></span>
+</div>
+
+<div id="memory_audit_list" style="flex:1;overflow-y:auto;padding-right:4px;font-size:.85em;min-height:120px;margin-top:6px"></div>
+
+<div style="flex-shrink:0;margin-top:8px;font-size:.78em;color:var(--dim);display:flex;gap:18px;align-items:center">
+  <span><span style="display:inline-block;width:10px;height:10px;background:#4caf50;border-radius:2px;vertical-align:middle;margin-right:4px"></span>L1 日常 (importance 0.6)</span>
+  <span><span style="display:inline-block;width:10px;height:10px;background:var(--gold);border-radius:2px;vertical-align:middle;margin-right:4px"></span>L2 周期 (0.8)</span>
+  <span><span style="display:inline-block;width:10px;height:10px;background:#ff5722;border-radius:2px;vertical-align:middle;margin-right:4px"></span>L3 里程碑 (0.95)</span>
+  <span style="margin-left:auto;color:var(--dim)">点击摘要/审计条目展开详情</span>
+</div>
+</div></div>
+
+<!-- [v1.6 P1-8] 情感记忆面板 -->
+<div class="modal" id="emotionModal"><div class="modal-box" style="width:1080px;max-width:96vw;height:88vh;display:flex;flex-direction:column;padding:20px 24px;overflow:hidden"><span class="close" onclick="closeEmotionModal()">&times;</span>
+<h2 style="margin:0 0 8px 0;flex-shrink:0">💖 情感记忆 <span style="color:var(--dim);font-size:.7em">Plutchik 八情绪模型：玩家 + NPC 情感状态 + 情感记忆库</span></h2>
+
+<div style="flex-shrink:0;display:flex;gap:14px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+  <span class="refresh-btn" onclick="refreshEmotionPanel(true)" style="cursor:pointer;color:var(--accent);font-size:.85em" title="手动刷新">⟳ 刷新</span>
+  <button class="btn-mini" id="emotion_autorefresh_btn" onclick="toggleEmotionAutoRefresh()" style="padding:6px 14px;font-size:.85em;cursor:pointer;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text)">自动刷新</button>
+  <span style="margin-left:auto;font-size:.78em;color:var(--dim)">玩家 ↑ / NPC列表 ↓ / 情感记忆检索 ↓</span>
+</div>
+
+<!-- 玩家情感状态 -->
+<div id="emotion_player" class="emotion-player-wrap" style="flex-shrink:0;margin-bottom:8px"></div>
+
+<!-- NPC 情感状态列表 -->
+<div style="flex-shrink:0;margin-bottom:6px;display:flex;gap:10px;align-items:center">
+  <span style="font-size:.85em;color:var(--accent);font-weight:600">👥 NPC 情感状态</span>
+  <span style="font-size:.78em;color:var(--dim)" id="emotion_npc_count"></span>
+</div>
+<div id="emotion_npc_list" style="flex:1;overflow-y:auto;padding-right:4px;font-size:.85em;min-height:120px;border-bottom:1px solid var(--border);padding-bottom:8px"></div>
+
+<!-- 情感记忆检索 -->
+<div style="flex-shrink:0;margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+  <span style="font-size:.85em;color:var(--accent);font-weight:600">🔍 情感记忆检索</span>
+  <select id="emotion_filter" onchange="loadEmotionalMemory()" style="padding:5px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.82em">
+    <option value="">全部情感</option>
+    <option value="joy">😊 喜悦 joy</option>
+    <option value="sadness">😢 悲伤 sadness</option>
+    <option value="anger">😠 愤怒 anger</option>
+    <option value="fear">😨 恐惧 fear</option>
+    <option value="surprise">😮 惊讶 surprise</option>
+    <option value="disgust">🤢 厌恶 disgust</option>
+    <option value="trust">🤝 信任 trust</option>
+    <option value="anticipation">🌟 期待 anticipation</option>
+  </select>
+  <input id="emotion_entity_filter" placeholder="按实体名过滤（可空）" style="padding:5px 10px;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.82em;width:180px">
+  <button onclick="loadEmotionalMemory()" class="btn-mini" style="padding:5px 12px;font-size:.82em;cursor:pointer;background:var(--panel);border:1px solid var(--border);border-radius:6px;color:var(--text)">检索</button>
+  <span style="font-size:.78em;color:var(--dim)" id="emotion_memory_count"></span>
+</div>
+<div id="emotion_memory_list" style="flex:1;overflow-y:auto;padding-right:4px;font-size:.85em;min-height:120px;margin-top:6px"></div>
+
+<div style="flex-shrink:0;margin-top:8px;font-size:.78em;color:var(--dim);display:flex;gap:18px;align-items:center;flex-wrap:wrap">
+  <span><span style="display:inline-block;width:10px;height:10px;background:#ffeb3b;border-radius:2px;vertical-align:middle;margin-right:4px"></span>joy 喜悦</span>
+  <span><span style="display:inline-block;width:10px;height:10px;background:#2196f3;border-radius:2px;vertical-align:middle;margin-right:4px"></span>sadness 悲伤</span>
+  <span><span style="display:inline-block;width:10px;height:10px;background:#f44336;border-radius:2px;vertical-align:middle;margin-right:4px"></span>anger 愤怒</span>
+  <span><span style="display:inline-block;width:10px;height:10px;background:#9c27b0;border-radius:2px;vertical-align:middle;margin-right:4px"></span>fear 恐惧</span>
+  <span><span style="display:inline-block;width:10px;height:10px;background:#ff9800;border-radius:2px;vertical-align:middle;margin-right:4px"></span>surprise 惊讶</span>
+  <span><span style="display:inline-block;width:10px;height:10px;background:#795548;border-radius:2px;vertical-align:middle;margin-right:4px"></span>disgust 厌恶</span>
+  <span><span style="display:inline-block;width:10px;height:10px;background:#4caf50;border-radius:2px;vertical-align:middle;margin-right:4px"></span>trust 信任</span>
+  <span><span style="display:inline-block;width:10px;height:10px;background:#00bcd4;border-radius:2px;vertical-align:middle;margin-right:4px"></span>anticipation 期待</span>
+  <span style="margin-left:auto;color:var(--dim)">强度<30%不显示提示</span>
+</div>
+</div></div>
 
 <div class="modal" id="mapModal"><div class="modal-box" style="width:920px;max-width:96vw;height:88vh;display:flex;flex-direction:column;padding:24px 28px;overflow:hidden"><span class="close" onclick="closeMap()">&times;</span><h2 style="margin:0 0 8px 0;flex-shrink:0">🗺️ 世界地图</h2>
 <div class="map-legend" style="flex-shrink:0;margin-bottom:8px"><span><span class="dot" style="background:var(--gold);box-shadow:0 0 10px rgba(212,175,55,.6)"></span>玩家位置</span><span><span class="dot" style="background:var(--accent-blue)"></span>地点</span><span style="color:var(--dim)">━━</span><span>路径</span></div>
@@ -1000,6 +1205,37 @@
   </div>
   <div style="font-size:.78em;color:var(--dim);margin-top:6px">支持 SillyTavern Character Card V2 格式和太虚幻境角色卡格式</div>
 </div>
+<div id="aiSpawnBlock" style="margin-bottom:14px;padding:12px;background:linear-gradient(135deg,rgba(212,175,55,.08),rgba(86,158,255,.06));border:1px solid rgba(212,175,55,.3);border-radius:10px">
+  <div style="font-size:.92em;color:var(--gold);margin-bottom:10px;font-weight:600">🤖 AI 自动生成角色</div>
+  <div style="font-size:.78em;color:var(--dim);margin-bottom:10px">让 AI 读取世界设定，自动生成符合世界观的 NPC</div>
+  <div class="fg" style="margin-bottom:10px"><label style="font-size:.82em">生成数量</label>
+    <select id="ai_spawn_count" style="width:100%;padding:8px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.88em">
+      <option value="1">1 个</option>
+      <option value="2">2 个</option>
+      <option value="3">3 个</option>
+      <option value="5" selected>5 个</option>
+      <option value="8">8 个</option>
+      <option value="10">10 个</option>
+    </select>
+  </div>
+  <div class="fg" style="margin-bottom:10px"><label style="font-size:.82em">角色类型倾向</label>
+    <select id="ai_spawn_focus" style="width:100%;padding:8px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:.88em">
+      <option value="all">不限定（覆盖各阶层）</option>
+      <option value="combat">战斗型（武者/侠客/护卫）</option>
+      <option value="social">社交型（商人/官员/名士）</option>
+      <option value="merchant">商业型（掌柜/伙计/手艺人）</option>
+      <option value="martial">修行/武林（修士/宗门弟子）</option>
+      <option value="commoner">平民百姓（农夫/猎户/仆从）</option>
+      <option value="antagonist">反派/敌对（黑道/邪修/对头）</option>
+    </select>
+  </div>
+  <div class="fg" style="margin-bottom:12px"><label style="font-size:.82em">自定义需求（可选）</label>
+    <textarea id="ai_spawn_requirement" rows="2" placeholder="例：&#10;1. 一个神秘的酒馆老板，暗中贩卖情报&#10;2. 玩家失散多年的师兄&#10;3. 与玩家有世仇的世家子弟" style="width:100%;padding:10px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em;outline:none;resize:vertical;font-family:inherit"></textarea>
+  </div>
+  <button id="btn_ai_spawn" class="btn" onclick="doAiSpawn()" style="width:100%;background:linear-gradient(135deg,var(--gold),#c9a832);border:none;color:#0d0c0f;font-weight:600">🤖 让 AI 生成角色</button>
+  <div id="ai_spawn_result" style="margin-top:10px;font-size:.82em;display:none"></div>
+</div>
+<div style="display:flex;align-items:center;gap:8px;margin:10px 0 14px"><div style="flex:1;height:1px;background:var(--border)"></div><span style="font-size:.78em;color:var(--dim)">或手动填写</span><div style="flex:1;height:1px;background:var(--border)"></div></div>
 <div class="fg"><label>名字 *</label><input type="text" id="npc_name" placeholder="例：小翠"></div>
 <div class="fg"><label>年龄</label><input type="number" id="npc_age" value="20" min="1" max="200"></div>
 <div class="fg"><label>职业/身份</label><input type="text" id="npc_role" placeholder="例：丫鬟、商人、侠客"></div>
@@ -1394,6 +1630,7 @@
 <div class="wp-tab" onclick="switchV10Tab('audit')" id="v10_tab_audit">🔍 审计</div>
 <div class="wp-tab" onclick="switchV10Tab('memory')" id="v10_tab_memory">🧠 记忆</div>
 <div class="wp-tab" onclick="switchV10Tab('stats')" id="v10_tab_stats">📊 性能</div>
+<div class="wp-tab" onclick="switchV10Tab('worldview')" id="v10_tab_worldview">🌍 世界观</div>
 </div>
 <div style="flex:1;overflow-y:auto;position:relative">
 <div id="v10_foreshadow" class="wp-panel active" style="width:100%;min-height:100%;padding:14px">
@@ -1424,22 +1661,77 @@
   </div>
   <div id="v10_stats_list" style="font-size:.88em"><div style="color:var(--dim);text-align:center;padding:20px">加载中...</div></div>
 </div>
+<div id="v10_worldview" class="wp-panel" style="width:100%;min-height:100%;padding:14px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+    <div style="font-size:.88em;color:var(--dim)">微调世界观设定，修改后立即生效并持久化到存档</div>
+    <button class="btn" style="font-size:.8em;padding:6px 16px;width:auto" onclick="loadV10Worldview()">🔄 重新加载</button>
+  </div>
+  <div id="v10_wv_form" style="font-size:.88em;max-width:680px">
+    <div style="margin-bottom:14px">
+      <label style="display:block;margin-bottom:6px;color:var(--dim)">世界名称</label>
+      <input id="wv_world_name" type="text" maxlength="50" style="width:100%;padding:6px 8px" placeholder="世界名称" />
+    </div>
+    <div style="margin-bottom:14px">
+      <label style="display:block;margin-bottom:6px;color:var(--dim)">世界背景描述（注入AI叙事prompt，建议200字内）</label>
+      <textarea id="wv_description" rows="3" maxlength="500" style="width:100%;padding:6px 8px;resize:vertical" placeholder="世界背景描述"></textarea>
+    </div>
+    <div style="display:flex;gap:14px;margin-bottom:14px">
+      <div style="flex:1">
+        <label style="display:block;margin-bottom:6px;color:var(--dim)">当前天气</label>
+        <input id="wv_weather" type="text" maxlength="20" style="width:100%;padding:6px 8px" placeholder="如：晴/阴/小雨/大雪" />
+      </div>
+      <div style="flex:1">
+        <label style="display:block;margin-bottom:6px;color:var(--dim)">当前季节</label>
+        <input id="wv_season" type="text" maxlength="20" style="width:100%;padding:6px 8px" placeholder="如：春/夏/秋/冬" />
+      </div>
+      <div style="flex:1">
+        <label style="display:block;margin-bottom:6px;color:var(--dim)">危机等级（0-10）</label>
+        <input id="wv_crisis_level" type="number" min="0" max="10" style="width:100%;padding:6px 8px" />
+      </div>
+    </div>
+    <div style="margin-bottom:14px">
+      <label style="display:block;margin-bottom:6px;color:var(--dim)">世界观补充设定（详细世界观简介，注入AI叙事prompt，最多1000字）</label>
+      <textarea id="wv_world_intro" rows="6" maxlength="1000" style="width:100%;padding:6px 8px;resize:vertical" placeholder="详细的世界观设定、风格基调、特殊规则等。留空则不注入。"></textarea>
+      <div style="font-size:.8em;color:var(--dim);margin-top:4px">此字段作为"世界观补充设定"注入每回合AI叙事prompt，AI会严格遵循。</div>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center">
+      <button class="btn" style="padding:8px 24px;width:auto" onclick="submitV10Worldview()">💾 保存并生效</button>
+      <span id="wv_status" style="font-size:.85em;color:var(--dim)"></span>
+    </div>
+    <div style="margin-top:18px;padding:10px 12px;background:rgba(255,255,255,.04);border-radius:6px;font-size:.82em;color:var(--dim)">
+      <div style="margin-bottom:4px;color:var(--fg)">说明</div>
+      · 世界名称/背景描述/天气/季节/危机等级 修改后立即写入存档并影响后续叙事<br/>
+      · 世界观补充设定 会作为"必须遵循"指令注入AI叙事prompt<br/>
+      · 世界类型等结构化字段不可改（会影响规则引擎/力量体系等子系统绑定）
+    </div>
+  </div>
+</div>
 </div>
 </div></div>
 
-<script src="/js/dom.js?v=3"></script>
-<script src="/js/core.js?v=3"></script>
-<script src="/js/bg-manager.js?v=4"></script>
-<script src="/js/ui.js?v=14"></script>
-<script src="/js/game.js?v=21"></script>
-<script src="/js/config-shared.js?v=6"></script>
-<script src="/js/settings.js?v=10"></script>
-<script src="/js/v10_panel.js?v=3"></script>
-<script src="/js/npc_prediction.js?v=1"></script>
-<script src="/js/auto_run.js?v=3"></script>
-<script src="/js/novel_roleplay.js?v=10"></script>
-<script src="/js/causal_graph.js?v=1"></script>
-<script src="/js/events.js?v=1"></script>
+<script src="/js/dom.js?v=d0c0eb68"></script>
+<script src="/js/core.js?v=da9b7ecf"></script>
+<script src="/js/bg-manager.js?v=e27e45d9"></script>
+<script src="/js/ui.js?v=d6c55ba8"></script>
+<script src="/js/game-utils.js?v=98bfba70"></script>
+<script src="/js/game-world.js?v=3327df02"></script>
+<script src="/js/game-npc.js?v=j1e2f3a4"></script>
+<script src="/js/game-panels.js?v=b1c2d3e4"></script>
+<script src="/js/game.js?v=33f0d908"></script>
+<script src="/js/config-shared.js?v=ddece993"></script>
+<script src="/js/settings.js?v=b90122d4"></script>
+<script src="/js/v10_panel.js?v=d2ad7361"></script>
+<script src="/js/npc_prediction.js?v=27315a45"></script>
+<script src="/js/auto_run.js?v=33846113"></script>
+<script src="/js/novel_roleplay.js?v=b82e2987"></script>
+<script src="/js/causal_graph.js?v=c966beec"></script>
+<script src="/js/events.js?v=09e960b6"></script>
+<script src="/js/rumor_panel.js?v=9579b2bf"></script>
+<script src="/js/planner_panel.js?v=c3d4e5f6"></script>
+<script src="/js/faction_panel.js?v=2fd0b935"></script>
+<script src="/js/retrieval_debug_panel.js?v=a925c452"></script>
+<script src="/js/memory_panel.js?v=9ab8a034"></script>
+<script src="/js/emotion_panel.js?v=35d5d6d8"></script>
 <!-- alpine-components.js moved to <head> before alpine.js CDN (see fix note) -->
 
 <div class="modal" id="npcPredictionModal"><div class="modal-box" style="width:850px;max-width:95vw;max-height:88vh;display:flex;flex-direction:column"><span class="close" onclick="closeNpcPrediction()">&times;</span>
