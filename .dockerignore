@@ -1,0 +1,45 @@
+# [v1.4 P1-8] Docker 构建排除清单 — 减小镜像上下文体积
+# 嵌入式 Python（容器内使用系统 Python，无需打包）
+python/
+
+# 运行时产物
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+
+# 日志与本地数据库
+*.log
+app/server.log
+app/data/chronoverse.db-shm
+app/data/chronoverse.db-wal
+
+# 存档（容器启动时通过卷挂载，不进镜像）
+app/saves/
+
+# 备份文件
+**/*.bak1
+**/*.bak2
+**/*.bak3
+**/*.bak4
+**/*.bak5
+
+# 密钥与本机配置（构建时不应进入镜像）
+# [P3-B] .secret_key 与 config.json 通过 docker-compose.yml 卷挂载注入容器，
+# 不烤进镜像，避免密钥随镜像分发泄露。首次部署需手动 cp 到 ./config/ 目录。
+app/.access_token
+app/.secret_key
+app/config.json
+app/config.json.example
+
+# Git / IDE
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# 文档（不影响运行）
+技术白皮书.md
+使用说明.txt
+app/README.md
+app/plugins/PLUGIN_DEV_GUIDE.md

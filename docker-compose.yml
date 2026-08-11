@@ -1,0 +1,42 @@
+# [v1.4 P1-8] 太虚幻境 容器编排
+# 普通玩家仍用 启动.bat；此文件用于服务器部署/多实例管理
+# 用法：
+#   docker compose up -d        # 启动
+#   docker compose logs -f      # 查看日志
+#   docker compose down         # 停止
+#
+# 首次启动前准备（在项目根目录下）：
+#   1. mkdir -p config data/saves data/appdata
+#   2. cp app/config.json config/config.json   # 复制并填入 API key（明文即可，首次启动会自动加密）
+#   3. cp app/.secret_key config/.secret_key    # 复制主密钥（用于解密 config.json 中的 API key）
+#      若不存在，可让容器首次启动自动生成；但注意：自动生成的新密钥无法解密旧 config.json，
+#      需先用本机 .secret_key 解密 config.json 为明文，再让容器用新密钥重新加密。
+services:
+  taixuhuanjing:
+    build: .
+    image: taixuhuanjing:latest
+    container_name: taixuhuanjing
+    restart: unless-stopped
+    ports:
+      - "8004:8004"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8004
+      - AUTO_OPEN_BROWSER=0
+      - TZ=Asia/Shanghai
+    volumes:
+      # 存档目录（含每世界 ChromaDB 索引，位于 saves/{world_id}/memory）
+      - ./data/saves:/app/saves
+      # 全局 MetaDB（worlds 索引等）
+      - ./data/appdata:/app/data
+      # 配置文件（含加密后的 API key）
+      - ./config/config.json:/app/config.json:ro
+      # [P3-B] 主加密密钥：用于解密 config.json 中的 enc: 前缀 API key
+      # 必须与本机加密 config.json 时使用的密钥一致，否则解密失败返回空串
+      - ./config/.secret_key:/app/.secret_key:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8004/api/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
