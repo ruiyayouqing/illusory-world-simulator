@@ -1194,6 +1194,33 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             self.player_state = loaded["player_state"]
             self.npc_states = loaded["npc_states"]
 
+        # [Bug] 2026-08-11 NPC 建档后重启丢失修复：
+        # load_game 优先从最新 slot 恢复 npc_states（槽快照可能早于 ai-spawn 建档），
+        # 重启后磁盘 npcs 目录里新建档的 NPC 不在内存 → 下一次 save_state 的
+        # [Bug#27] 孤儿清理会把它们的 .json 主文件 unlink 删除（只剩 .bak 轮转备份）。
+        # 修复：槽位加载后合并磁盘 npcs 目录（槽优先，磁盘补充），
+        # 磁盘上的正式档案永远进入内存 → 不会再被孤儿清理误删。
+        try:
+            npcs_dir = self.save_manager.base_dir / world_id / "state" / "npcs"
+            if npcs_dir.exists():
+                merged = 0
+                for npc_file in npcs_dir.glob("*.json"):
+                    nid = npc_file.stem
+                    if nid in self.npc_states:
+                        continue  # 槽位优先，不覆盖
+                    try:
+                        npc_data = json.loads(npc_file.read_text(encoding="utf-8"))
+                        self.npc_states[nid] = NPCState(**npc_data)
+                        merged += 1
+                        logger.info("[load_game] 合并磁盘孤儿档案: %s (%s)",
+                                    nid, npc_data.get("name", "?"))
+                    except Exception as e:
+                        logger.warning("[load_game] 合并磁盘档案失败 %s: %s", nid, e)
+                if merged:
+                    logger.info("[load_game] 磁盘 npcs 合并完成，共补充 %d 个档案", merged)
+        except Exception as e:
+            logger.warning("[load_game] npcs 目录合并异常: %s", e)
+
         self.memory = self.save_manager.get_memory(world_id)
         self.lorebook = Lorebook()
         if self.world_state:
