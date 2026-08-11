@@ -445,7 +445,8 @@ class PlayerAgent(BaseAgent):
                                    max_context: int = 32768,
                                    scene_type=None,
                                    narrative_max_chars: int = 1000,
-                                   time_anchor: str = ""):
+                                   time_anchor: str = "",
+                                   summary_head: str = ""):
         """
         流式生成叙事文本。返回生成器，逐 token yield。
         与 generate_full_response 共享相同的上下文构建逻辑。
@@ -554,11 +555,18 @@ class PlayerAgent(BaseAgent):
         # 注意到当前叙事时间线，防止"次日上午"被忽略后叙事退回"昨夜"。
         if time_anchor:
             messages.append({"role": "system", "content": time_anchor})
+        # [2026-08-10] 剧情概况/纪要头部（早期剧情脉络，旧→新）：独立 system 层
+        # 放在最近历史之前，让 LLM 先掌握全部剧情脉络再读近期细节
+        if summary_head:
+            messages.append({
+                "role": "system",
+                "content": "【早期剧情脉络（概况/纪要，旧→新）- 用于掌握全部剧情走向，不可与当前冲突】\n" + summary_head,
+            })
         if narrative_history:
             recent = narrative_history[-8:] if len(narrative_history) > 8 else narrative_history
             _total = len(recent)
             for idx, entry in enumerate(recent):
-                pi = entry.get("player_input", "")[:400]
+                pi = entry.get("player_input", "")[:1500]  # [2026-08-10] 400→1500：历史轮长输入不再截断丢失关键情节
                 # [Bug v9.1] 最近一条历史放宽截断到 1500 字，避免上一轮 AI 输出里的
                 # 时间锚点（如"第二天上午张瑶到达"）在 800 字处被截断丢失
                 text_limit = 1500 if idx == _total - 1 else 800
@@ -735,7 +743,7 @@ class PlayerAgent(BaseAgent):
             recent = narrative_history[-6:] if len(narrative_history) > 6 else narrative_history
             _total = len(recent)
             for idx, entry in enumerate(recent):
-                pi = entry.get("player_input", "")[:300]
+                pi = entry.get("player_input", "")[:1500]  # [2026-08-10] 300→1500：与流式路径对齐，历史长输入不截断
                 # [Bug v9.1] 最近一条历史放宽截断到 1500 字，避免时间锚点丢失
                 text_limit = 1500 if idx == _total - 1 else 800
                 text = entry.get("text", "")[:text_limit]
@@ -910,7 +918,7 @@ class PlayerAgent(BaseAgent):
             f"5. 禁止输出通用选项：观察四周、整理思绪、制定计划、找人聊天、主动出击、打破僵局、"
             f"去草坪转转、去厨房看看、找个地方歇息、四处走走、看看周围、和附近的人交谈\n"
             f"6. 选项要具体：说谁、做什么、怎么做，不要模糊描述\n"
-            f"\n【好选项示例】叙事最后「花无缺端来一盘烤排骨，张立吃得正香」→ "
+            f"\n【好选项示例】叙事最后「花无缺端来一盘烤排骨，玩家正吃得香」→ "
             f"选项应是「夸赞花无缺的手艺，让她再烤一盘」而不是「去厨房看看」\n"
             f"【坏选项示例】叙事最后「众人在宴会上欢笑」→ 「去草坪转转」是坏选项，因为主角还在宴会上\n"
             f"\n请输出JSON：\n"
@@ -1001,9 +1009,10 @@ class PlayerAgent(BaseAgent):
             # 如果文本过长且包含预测性词汇，截断
             if len(text) > 600:
                 prediction_markers = [
-                    '这一', '这导致', '此后', '最终', '后来',
+                    # [v12.6] 收敛：只保留明确的总结/预测句式，移除"这一/此后/最终/后来/
+                    # 将会"等正文高频词（正常叙事里"后来他……"极其常见，会被误截）
                     '多年以后', '几年后', '多年后', '最终导致',
-                    '可能引发', '将会', '势必', '必然',
+                    '可能引发', '将会引发', '势必', '必然',
                     '消息迅速', '流言四起', '一时之间',
                 ]
                 if any(marker in text for marker in prediction_markers):
@@ -1018,32 +1027,31 @@ class PlayerAgent(BaseAgent):
             return text.strip()
 
         main_parts = []
-        for p in paragraphs:
+        _total_paras = len(paragraphs)
+        # [v12.6] 灰色旁白检测收敛：只保留明确的总结/预测句式，移除"这一/然而/尽管/
+        # 随着/此后/因此"等正文高频词（它们会误杀正常叙事段落，如"走完这一段"）
+        # 且只对后半段段落启用检测——旁白总结只会出现在正文末尾，正文前半绝不可能误杀
+        skip_patterns = [
+            # 明确的总结/预测/新闻式旁白（保留）
+            r'多年以后', r'几年后', r'多年后',
+            r'这一决策导致', r'最终导致', r'最终成为',
+            r'可能引发', r'将会引发', r'势必', r'已不可逆转',
+            r'消息迅速', r'流言四起', r'一时之间',
+            r'成为蝴蝶效应', r'蝴蝶效应的起点',
+            r'影响.*朝堂格局', r'引发.*权力斗争',
+            r'如同.*一颗石子', r'激起了.*涟漪',
+            r'原本应由', r'为后续', r'内部动荡',
+            r'市民们从', r'民众对', r'留下了伏笔',
+        ]
+        for idx, p in enumerate(paragraphs):
             p = p.strip()
             if not p:
                 continue
-            # [v9] 增强灰色文本检测模式
-            skip_patterns = [
-                # 时间跳转/总结
-                r'春季的', r'夏季的', r'秋季的', r'冬季的',
-                r'随着', r'此后', r'从此', r'因此', r'这一决策导致',
-                r'原本应由', r'导致了', r'已不可逆转',
-                r'市民们从', r'民众对', r'为后续',
-                r'内部动荡', r'笼罩着', r'留下了伏笔',
-                r'然而', r'尽管', r'尽管危机',
-                r'这一', r'这导致', r'这使得',
-                # [v9] 新增：预测/旁白/总结模式
-                r'消息迅速', r'流言四起', r'一时之间',
-                r'可能引发', r'将会引发', r'势必',
-                r'多年以后', r'几年后', r'多年后',
-                r'最终导致', r'最终成为', r'成为了',
-                r'如同.*一颗石子', r'激起了.*涟漪',
-                r'成为蝴蝶效应', r'蝴蝶效应的起点',
-                r'影响.*朝堂格局', r'引发.*权力斗争',
-            ]
-            is_gray = any(re.search(pat, p) for pat in skip_patterns)
-            if is_gray and main_parts:
-                break
+            # 旁白检测只对后半段生效（正文前半的"然而/随着"等转折是正常叙事）
+            if idx >= _total_paras // 2:
+                is_gray = any(re.search(pat, p) for pat in skip_patterns)
+                if is_gray and main_parts:
+                    break
             main_parts.append(p)
         return "\n\n".join(main_parts).strip()
 

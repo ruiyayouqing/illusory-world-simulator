@@ -160,7 +160,7 @@ class NarrativeStyleManager:
         perspective_map = {
             "first": "【叙事视角：第一人称】\n叙事中统一使用「我」来指代玩家，如「我走进了大殿」、「我拔出剑」。禁止使用玩家姓名或「你」。",
             "second": "【叙事视角：第二人称】\n叙事中统一使用「你」来指代玩家，如「你走进了大殿」、「你拔出剑」。禁止使用玩家姓名代替「你」。",
-            "third": "【叙事视角：第三人称】\n叙事中统一使用玩家姓名来指代玩家，如「张立走进了大殿」、「张立拔出剑」。禁止使用「你」或「我」。",
+            "third": "【叙事视角：第三人称】\n叙事中统一使用玩家姓名来指代玩家，如「玩家姓名走进了大殿」、「玩家姓名拔出剑」。禁止使用「你」或「我」。",
         }
         perspective_instruction = perspective_map.get(perspective, perspective_map["third"])
         result += f"\n\n{perspective_instruction}"

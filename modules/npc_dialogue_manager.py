@@ -193,7 +193,7 @@ class NpcDialogueManager:
         for npc_id, npc in all_npcs.items():
             if npc_id == "player":
                 continue
-            if getattr(npc, "is_dormant", False):
+            if getattr(npc, "is_dormant", False) or getattr(npc, "hidden", False):
                 continue
             if any(s in (npc.status_effects or [])
                    for s in ("昏迷", "垂死", "囚禁", "已故")):

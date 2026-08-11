@@ -266,7 +266,7 @@ def _get_acquaintance_nearby(npc: "NPCState", all_npcs: dict) -> str | None:
     for other_id, other in all_npcs.items():
         if other_id == npc.agent_id:
             continue
-        if getattr(other, "is_dormant", False):
+        if getattr(other, "is_dormant", False) or getattr(other, "hidden", False):
             continue
         if "已故" in (other.tags or []):
             continue
@@ -314,7 +314,7 @@ def classify_all(
     """批量分类，返回统计信息"""
     tiers = {"core": 0, "secondary": 0}
     for npc in npcs:
-        if getattr(npc, "is_dormant", False):
+        if getattr(npc, "is_dormant", False) or getattr(npc, "hidden", False):
             continue
         tier = classify_tier(npc, player, world_state)
         tiers[tier] += 1

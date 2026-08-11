@@ -104,7 +104,8 @@ class PerceptionScope:
             True 表示跳过 LLM 调用，由规则降级处理
         """
         # 休眠 NPC 不参与思考
-        if getattr(npc, "is_dormant", False):
+        # [功能二] 玩家手动隐藏的 NPC 也不参与思考
+        if getattr(npc, "is_dormant", False) or getattr(npc, "hidden", False):
             return True
 
         # 已故/昏迷等状态跳过
@@ -137,7 +138,7 @@ class PerceptionScope:
         player: "PlayerState | None" = None,
     ) -> str:
         """获取 NPC 当前感知区（active/aware/rumor/sleeping）"""
-        if getattr(npc, "is_dormant", False):
+        if getattr(npc, "is_dormant", False) or getattr(npc, "hidden", False):
             return "sleeping"
         if not self.perception:
             return "active"
@@ -171,7 +172,8 @@ class PerceptionScope:
         for other_id, other in all_npcs.items():
             if other_id == npc.agent_id:
                 continue
-            if getattr(other, "is_dormant", False):
+            # [功能二] 隐藏的 NPC 不应被其他 NPC 感知到
+            if getattr(other, "is_dormant", False) or getattr(other, "hidden", False):
                 continue
             if "已故" in (other.tags or []):
                 continue

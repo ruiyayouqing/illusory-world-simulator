@@ -90,7 +90,8 @@ class NpcAutonomous:
         turn_id = f"{current_day}:{current_time}"
         for npc in npcs:
             # [NovelRoleplay] 跳过休眠 NPC（未来角色未登场前不参与自主行动）
-            if getattr(npc, 'is_dormant', False):
+            # [功能二] 跳过玩家手动隐藏的 NPC
+            if getattr(npc, 'is_dormant', False) or getattr(npc, 'hidden', False):
                 continue
             # [v1.2] 时序轮询：按时段限制（取代原 last_action_day 每日限制）
             if npc.last_action_turn == turn_id:
@@ -319,7 +320,8 @@ class NpcAutonomous:
         results = []
         for npc in npcs:
             # 跳过休眠 NPC（由登场机制处理）
-            if getattr(npc, 'is_dormant', False):
+            # [功能二] 跳过玩家手动隐藏的 NPC
+            if getattr(npc, 'is_dormant', False) or getattr(npc, 'hidden', False):
                 continue
             # 跳过今天已行动的 NPC
             if npc.last_action_day == world_state.current_day:

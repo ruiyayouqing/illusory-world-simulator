@@ -99,21 +99,37 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str,
                 await websocket.send_text(json.dumps({"type": "pong"}))
             elif msg.get("type") == "stream_input" and engine:
                 text = msg.get("text", "")
+                retry_flag = bool(msg.get("retry"))  # [v12.1] 重试标记
                 if text and engine.player_state:
                     await websocket.send_text(json.dumps({"type": "thinking"}, ensure_ascii=False))
                     _drain_queue(token_queue)
                     consumer_task = asyncio.ensure_future(stream_consumer())
+                    retry_failed_error = None
                     try:
                         # [v10] 与 HTTP 端点一致，加游戏锁防止竞态（H23）；并激活当前客户端的流式回调（H21）
                         async with engine._game_lock:
                             engine.set_active_stream_client(client_id)
-                            result = await asyncio.to_thread(engine.process_player_input, text)
+                            # [v12.1] 重试语义：先回滚到输入前快照，再重新生成
+                            if retry_flag:
+                                retry_res = await asyncio.to_thread(engine.retry_last_turn, text)
+                                if not retry_res.get("success"):
+                                    retry_failed_error = retry_res.get("error", "重试失败，游戏状态未改变")
+                            if retry_failed_error is None:
+                                result = await asyncio.to_thread(engine.process_player_input, text)
                     except Exception:
                         await token_queue.put(None)
                         raise
                     finally:
                         # [v10] process_player_input 结束后放入 None 哨兵，确保消费者能退出（H22）
                         await token_queue.put(None)
+                    if retry_failed_error is not None:
+                        state = engine.get_game_state()
+                        await websocket.send_text(json.dumps({
+                            "type": "result",
+                            "result": {"error": retry_failed_error},
+                            "state": state,
+                        }, ensure_ascii=False))
+                        continue
                     try:
                         await asyncio.wait_for(consumer_task, timeout=5)
                     except asyncio.TimeoutError:
@@ -128,11 +144,23 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str,
                     }, ensure_ascii=False))
             elif msg.get("type") == "input" and engine:
                 text = msg.get("text", "")
+                retry_flag = bool(msg.get("retry"))  # [v12.1] 重试标记
                 if text and engine.player_state:
                     await websocket.send_text(json.dumps({"type": "thinking"}))
                     # [v10] 与 HTTP 端点一致，加游戏锁防止竞态（H23）
                     async with engine._game_lock:
                         engine.set_active_stream_client(client_id)
+                        # [v12.1] 重试语义：先回滚到输入前快照，再重新生成
+                        if retry_flag:
+                            retry_res = await asyncio.to_thread(engine.retry_last_turn, text)
+                            if not retry_res.get("success"):
+                                state = engine.get_game_state()
+                                await websocket.send_text(json.dumps({
+                                    "type": "result",
+                                    "result": {"error": retry_res.get("error", "重试失败，游戏状态未改变")},
+                                    "state": state,
+                                }, ensure_ascii=False))
+                                continue
                         result = await asyncio.to_thread(engine.process_player_input, text)
                     state = engine.get_game_state()
                     await websocket.send_text(json.dumps({

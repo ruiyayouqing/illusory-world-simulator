@@ -477,17 +477,26 @@ class AutoRunEngine:
         full_log_with_header = header + full_log
 
         # [v1.2] 多日汇总时放大日志预算和输出 token
-        # 单日 log_budget=3000 / max_tokens=1500（约 750 中文字）
-        # 多日 log_budget=6000 / max_tokens=4000（支持 2000-3000 中文字章节）
-        # 日志预算按天数线性增长，但上限 8000（避免 prompt 过长）
-        multi_day_log_budget = min(8000, 3000 + days_span * 500)
+        # [2026-08-10] 日志预算上限提到 150000（模型 1M 上下文，超预算走"尾部完整+头部摘要"）
+        multi_day_log_budget = min(150000, 3000 + days_span * 500)
         multi_day_max_tokens = 4000 if days_span > 1 else 1500
+
+        # [2026-08-09] 注入世界观设定 + NPC 人物档案，解决章节与设定/上文脱节
+        world_intro = (eng.world_def or {}).get("world_intro", "") if eng.world_def else ""
+        npc_context = ""
+        if eng.npc_states:
+            try:
+                from .prompt_utils import build_npc_context
+                npc_context = build_npc_context(eng.npc_states, world_state=eng.world_state)
+            except Exception:
+                npc_context = ""
 
         chapter = eng.narrative.generate_novel_chapter(
             eng.player_state, eng.world_state, full_log_with_header,
             age_info=age_info,
             economy_info=economy_info,
             butterfly_info=butterfly_info,
+            world_intro=world_intro, npc_context=npc_context,
             max_tokens=multi_day_max_tokens,
             log_budget=multi_day_log_budget,
             days_span=days_span,

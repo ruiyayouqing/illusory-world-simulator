@@ -191,8 +191,18 @@ class SaveManager:
         result = []
         for world_id, info in self.index.get("saves", {}).items():
             manifest_path = self.base_dir / world_id / "manifest.json"
-            if manifest_path.exists():
-                result.append(info)
+            if not manifest_path.exists():
+                continue
+            # [v13] 防御：manifest 缺少关键字段的损坏存档不显示，
+            # 避免前端列表出现无法加载的坏档（如只有 version 的空 manifest）
+            try:
+                m = load_json_safe(manifest_path, default={}) or {}
+                if not (m.get("world_id") and m.get("world_name")):
+                    logger.warning("跳过损坏存档 %s: manifest 缺少关键字段", world_id)
+                    continue
+            except Exception:
+                continue
+            result.append(info)
         return result
 
     def save_exists(self, world_id: str) -> bool:

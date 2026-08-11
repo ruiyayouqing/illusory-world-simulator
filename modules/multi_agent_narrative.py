@@ -129,13 +129,17 @@ class DialogueWriter:
         self.llm = llm
 
     def write_narrative(self, outline: str, character_notes: str, context: str,
-                        player_input: str, style: str = "") -> str:
+                        player_input: str, style: str = "",
+                        narrative_max_chars: int = 2000) -> str:
         """基于大纲和角色备注撰写完整叙事。"""
         if not self.llm:
             return ""
 
         # [v1.4 P2-10] Prompt injection 防护
         safe_input = sanitize_player_input(player_input)
+        # [v12.2] 字数要求参数化：跟随全局叙事长度配置，不再写死 500-1000字
+        _min_chars = int(narrative_max_chars * 0.8)
+        _max_tokens = max(2048, int(narrative_max_chars * 1.8) + 512)  # 中文 1字≈1.5-2 token，留余量
         prompt = f"""你是叙事撰写师。请基于情节大纲和角色备注，撰写完整的叙事文本。
 
 【上下文】
@@ -154,7 +158,7 @@ class DialogueWriter:
 {style or "默认"}
 
 【要求】
-1. 500-1000字
+1. 字数必须达到{_min_chars}字以上，上限{narrative_max_chars}字（这是硬性要求，少于{_min_chars}字算失败）
 2. 对白自然，符合角色性格
 3. 描写生动，有画面感
 4. 严格遵循大纲的情节走向
@@ -163,7 +167,7 @@ class DialogueWriter:
 直接输出叙事文本，不要加任何前缀："""
 
         try:
-            return self.llm.chat(prompt, temperature=0.8, max_tokens=1024) or ""
+            return self.llm.chat(prompt, temperature=0.8, max_tokens=_max_tokens) or ""
         except Exception as e:
             logger.warning("DialogueWriter failed: %s", e)
             return ""
@@ -191,7 +195,8 @@ class MultiAgentNarrativeEngine:
         return self._enabled and self.llm is not None
 
     def generate(self, context: str, player_input: str, character_info: str = "",
-                 character_state: str = "", scene_type: str = "", style: str = "") -> NarrativeDraft:
+                 character_state: str = "", scene_type: str = "", style: str = "",
+                 narrative_max_chars: int = 2000) -> NarrativeDraft:
         """
         多智能体协作生成叙事。
         流程：情节大纲 → 角色审查 → 叙事撰写 → （如有问题）修订
@@ -224,7 +229,8 @@ class MultiAgentNarrativeEngine:
 
             # 4. 对白撰写师生成最终叙事
             draft.final_narrative = self.writer.write_narrative(
-                draft.plot_outline, draft.character_notes, context, player_input, style
+                draft.plot_outline, draft.character_notes, context, player_input, style,
+                narrative_max_chars=narrative_max_chars,
             )
 
             if draft.final_narrative:

@@ -136,7 +136,7 @@
     "bg_color": "#0a0a0f",
     "text_color": "#e0d5c1",
     "panel_bg": "#111120",
-    "strip_gray_narrative": true
+    "strip_gray_narrative": false
   },
   "server": {
     "host": "127.0.0.1",

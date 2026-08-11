@@ -268,6 +268,33 @@ async def get_npc_zones():
     return {"zones": engine.npc_perception.get_zone_display()}
 
 
+class ToggleHideRequest(BaseModel):
+    """[功能二] 隐藏/恢复 NPC — 不删除数据，仅标记 hidden 字段"""
+    hidden: bool
+
+
+@router.post("/npc/{npc_id}/toggle-hide")
+async def toggle_hide_npc(npc_id: str, req: ToggleHideRequest):
+    engine = get_engine()
+    if not engine or not engine.npc_states:
+        raise HTTPException(status_code=503, detail="游戏未初始化")
+    npc = engine.npc_states.get(npc_id)
+    if not npc:
+        raise HTTPException(status_code=404, detail="角色不存在")
+
+    npc.hidden = req.hidden
+    engine.save_manager.save_state(
+        engine.current_world_id,
+        engine.meta,
+        engine.world_state,
+        engine.player_state,
+        engine.npc_states,
+    )
+    logger.info("Player %s NPC: %s (%s)",
+                "hid" if req.hidden else "revealed", npc.name, npc_id)
+    return {"status": "ok", "hidden": npc.hidden}
+
+
 @router.get("/npc-evolution/{npc_id}")
 async def get_npc_evolution(npc_id: str):
     engine = get_engine()
@@ -343,6 +370,12 @@ async def get_who_is_who():
             })
     directory["recent_rumors"] = recent_rumors
     directory["info_visibility"] = engine.npc_registry.get_info_visibility()
+    # [功能二] 过滤掉玩家手动隐藏的 NPC，不出现在"何许人也"面板
+    hidden_ids = {nid for nid, n in engine.npc_states.items() if getattr(n, 'hidden', False)} if engine.npc_states else set()
+    if hidden_ids and isinstance(directory.get("factions"), dict):
+        for fac in directory["factions"]:
+            directory["factions"][fac] = [info for info in directory["factions"][fac] if info.get("npc_id") not in hidden_ids]
+        directory["known_count"] = sum(len(v) for v in directory["factions"].values())
     return directory
 
 

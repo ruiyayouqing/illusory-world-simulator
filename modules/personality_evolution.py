@@ -262,7 +262,8 @@ def batch_check_npcs(
     shifts = []
     for npc in npc_iter:
         # 跳过休眠 NPC
-        if getattr(npc, 'is_dormant', False):
+        # [功能二] 跳过玩家手动隐藏的 NPC
+        if getattr(npc, 'is_dormant', False) or getattr(npc, 'hidden', False):
             continue
         try:
             shift = check_and_apply_personality_shift(

@@ -74,9 +74,21 @@ _token_file = BASE_DIR / ".access_token"
 
 
 def _init_access_token():
-    """初始化或读取访问令牌"""
+    """初始化或读取访问令牌
+    优先级: 环境变量 TXHJ_ACCESS_TOKEN > .access_token 文件 > 随机生成
+    公网部署时通过 systemd Environment=TXHJ_ACCESS_TOKEN=xxx 固定令牌，
+    方便手机端输入；本地部署保持原逻辑不变。
+    """
     global _access_token
-    if _token_file.exists():
+    env_token = os.environ.get("TXHJ_ACCESS_TOKEN", "").strip()
+    if env_token:
+        _access_token = env_token
+        # 同步写入文件，保持与 deps 模块持久化一致
+        try:
+            _token_file.write_text(_access_token, encoding="utf-8")
+        except Exception:
+            pass
+    elif _token_file.exists():
         _access_token = _token_file.read_text(encoding="utf-8").strip()
     if not _access_token:
         _access_token = secrets.token_urlsafe(32)
@@ -235,6 +247,10 @@ async def security_middleware(request: Request, call_next):
            修复 /api/access-token 暴露：仅本地 + 已认证请求可访问"""
     path = request.url.path
 
+    # CORS 预检请求直接放行（OPTIONS 不带 Authorization header）
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     # 静态资源和非API路径不检查
     if not path.startswith("/api/"):
         return await call_next(request)
@@ -259,8 +275,10 @@ async def security_middleware(request: Request, call_next):
         # 本地请求也要返回（前端首次加载需要），但浏览器跨域请求会被 Host 校验挡掉
         return await call_next(request)
 
-    # 对敏感端点检查令牌（如果令牌已设置）
-    if _access_token and _is_sensitive(path):
+    # [v13] 白名单式保护：除 /api/health（探活）外，所有 /api/ 端点均需令牌
+    # 修复：原黑名单 _SENSITIVE_PATHS 覆盖不全，/api/npcs、/api/npc-actions 等
+    # 核心接口无 token 即可访问，导致公网"免令牌直进游戏"
+    if _access_token and path != "/api/health":
         # 可信本地请求直接放行
         if is_trusted_local:
             return await call_next(request)

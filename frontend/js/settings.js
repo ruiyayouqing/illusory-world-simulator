@@ -163,6 +163,29 @@ function getCurrentFontSize() {
   return fs ? fs.value : 'medium';
 }
 
+// [Bug修复] 将 /api/config/raw 的响应同步到 Alpine settingsPanel 组件的 this.config，
+// 使 x-model 绑定的值与 DOM 值一致，避免 reactivity 用过时值覆盖 input。
+function syncAlpineConfig(c) {
+  try {
+    var el = $('stov');
+    if (!el || !window.Alpine) return;
+    var data = Alpine.$data(el);
+    if (!data || !data.config) return;
+    // 逐段合并，保留 Alpine 默认值的同时用服务器返回值覆盖
+    if (c.llm) data.config.llm = Object.assign({}, data.config.llm, c.llm);
+    // [2026-08-10] 备用模型（cheap_llm）已移除，不再回填
+    if (c.dialogue_llm) data.config.dialogue_llm = Object.assign({}, data.config.dialogue_llm, c.dialogue_llm);
+    if (c.image) data.config.image = Object.assign({}, data.config.image, c.image);
+    if (c.embedding) data.config.embedding = Object.assign({}, data.config.embedding, c.embedding);
+    if (c.ui) data.config.ui = Object.assign({}, data.config.ui, c.ui);
+    if (c.fixed_prompt) data.config.fixed_prompt = Object.assign({}, data.config.fixed_prompt, c.fixed_prompt);
+    if (c.game) data.config.game = Object.assign({}, data.config.game, c.game);
+    if (c.npc_info_visibility) data.config.npc_info_visibility = c.npc_info_visibility;
+  } catch(e) {
+    console.warn('syncAlpineConfig failed:', e);
+  }
+}
+
 async function loadSettings() {
   try {
     // [Bug] 使用 /api/config/raw 获取未脱敏的API Key，避免保存时将脱敏Key覆盖真实Key
@@ -170,13 +193,22 @@ async function loadSettings() {
     var c = d || {};
     // [P3-8] 使用共享模块填充 DOM
     fillDOMFromConfig(c);
+    // [Bug修复] 同步 Alpine 的 config 对象，防止 x-model reactivity 用过时的
+    // this.config（页面加载时的旧值）覆盖 fillDOMFromConfig 刚设置的 DOM 值。
+    // 这是 embedding key 等无 profile 后备的字段丢失的根因。
+    syncAlpineConfig(c);
     // 叙事风格（非通用字段，仍在此处理）
     var ns = c.game?.narrative_style || '真人作者';
     var sel = $('st_narrative_style');
-    if (ns === '自定义') {
-      sel.value = '自定义';
+    // [v1.5] 填充 3 个自定义风格槽位（config.narrative_styles 字典）
+    var customStyles = c.narrative_styles || {};
+    for (var ci = 1; ci <= 3; ci++) {
+      var cta = $('st_custom_style_' + ci);
+      if (cta) cta.value = customStyles['自定义' + ci] || '';
+    }
+    if (/^自定义[123]$/.test(ns)) {
+      sel.value = ns;
       $('custom_style_section').style.display = 'block';
-      $('st_custom_style').value = c.game?.narrative_style_custom || '';
     } else {
       sel.value = ns;
       $('custom_style_section').style.display = 'none';
@@ -184,7 +216,7 @@ async function loadSettings() {
     // [Bug] 叙事视角
     $('st_narrative_perspective').value = c.game?.narrative_perspective || 'third';
     // 叙事字数滑块
-    var nmc = c.game?.narrative_max_chars || 1000;
+    var nmc = c.game?.narrative_max_chars || 2000;
     var slider = $('st_narrative_chars_slider');
     var hiddenVal = $('st_narrative_max_chars');
     if (slider) slider.value = nmc;
@@ -273,11 +305,9 @@ function loadV10Settings(c) {
 
 var _llmProfiles = {};
 var _imgProfiles = {};
-var _cheapProfiles = {};
 var _dlgProfiles = {};
 var _activeLlm = '';
 var _activeImg = '';
-var _activeCheap = '';
 var _activeDlg = '';
 
 async function loadProfiles() {
@@ -285,11 +315,9 @@ async function loadProfiles() {
     var d = await api('GET', '/api/model-profiles');
     _llmProfiles = d.llm_profiles || {};
     _imgProfiles = d.image_profiles || {};
-    _cheapProfiles = d.cheap_llm_profiles || {};
     _dlgProfiles = d.dialogue_llm_profiles || {};
     _activeLlm = d.active_llm || '';
     _activeImg = d.active_image || '';
-    _activeCheap = d.active_cheap_llm || '';
     _activeDlg = d.active_dialogue_llm || '';
 
     var selL = $('st_llm_profile');
@@ -300,17 +328,6 @@ async function loadProfiles() {
       if (name === _activeLlm) opt.selected = true;
       selL.appendChild(opt);
     });
-
-    var selC = $('st_cheap_profile');
-    if (selC) {
-      selC.innerHTML = '<option value="">-- 手动填写 --</option>';
-      Object.keys(_cheapProfiles).forEach(function(name) {
-        var opt = document.createElement('option');
-        opt.value = name; opt.textContent = name;
-        if (name === _activeCheap) opt.selected = true;
-        selC.appendChild(opt);
-      });
-    }
 
     var selD = $('st_dlg_profile');
     if (selD) {
@@ -341,11 +358,6 @@ async function applyProfile(target) {
     keyId = 'st_lk';
     urlId = 'st_lb';
     modelId = 'st_lm';
-  } else if (target === 'cheap') {
-    selId = 'st_cheap_profile';
-    keyId = 'st_cheap_lk';
-    urlId = 'st_cheap_lb';
-    modelId = 'st_cheap_lm';
   } else if (target === 'dialogue') {
     selId = 'st_dlg_profile';
     keyId = 'st_dlg_lk';
@@ -365,8 +377,9 @@ async function applyProfile(target) {
     var d = await api('POST', '/api/model-profiles/apply', {name: name, target: target});
     if (d.error) { alert(d.error); return; }
     // [Bug] 使用后端返回的真实配置（含未脱敏API Key），而非本地缓存的脱敏Key
-    // 后端 /model-profiles/apply 返回 {status, llm, image, cheap_llm, dialogue_llm}
-    var sectionMap = {llm: 'llm', cheap: 'cheap_llm', dialogue: 'dialogue_llm', image: 'image'};
+    // [2026-08-10] 备用模型（cheap_llm）已移除
+    // 后端 /model-profiles/apply 返回 {status, llm, image, dialogue_llm}
+    var sectionMap = {llm: 'llm', dialogue: 'dialogue_llm', image: 'image'};
     var p = d[sectionMap[target]] || d.config || d;
     if (p && p.api_key !== undefined) {
       $(keyId).value = p.api_key || '';
@@ -374,7 +387,6 @@ async function applyProfile(target) {
       $(modelId).value = p.model_name || '';
     }
     if (target === 'llm') _activeLlm = name;
-    else if (target === 'cheap') _activeCheap = name;
     else if (target === 'dialogue') _activeDlg = name;
     else _activeImg = name;
   } catch(e) { alert('切换失败'); }
@@ -388,12 +400,6 @@ async function saveProfile(target) {
     urlId = 'st_lb';
     modelId = 'st_lm';
     selId = 'st_llm_profile';
-  } else if (target === 'cheap') {
-    nameElId = 'st_cheap_pname';
-    keyId = 'st_cheap_lk';
-    urlId = 'st_cheap_lb';
-    modelId = 'st_cheap_lm';
-    selId = 'st_cheap_profile';
   } else if (target === 'dialogue') {
     nameElId = 'st_dlg_pname';
     keyId = 'st_dlg_lk';
@@ -429,7 +435,6 @@ async function saveProfile(target) {
 async function deleteProfile(target) {
   var selId;
   if (target === 'llm') selId = 'st_llm_profile';
-  else if (target === 'cheap') selId = 'st_cheap_profile';
   else if (target === 'dialogue') selId = 'st_dlg_profile';
   else selId = 'st_img_profile';
   var sel = document.getElementById(selId);
@@ -447,8 +452,7 @@ async function testConnection(modelType) {
   // 根据模型类型获取对应的输入框值
   var keyMap = {
     'llm':       { key: 'st_lk',       url: 'st_lb', model: 'st_lm',       btn: 'btn_test_llm',       result: 'test_result_llm' },
-    'cheap':     { key: 'st_cheap_lk', url: 'st_cheap_lb', model: 'st_cheap_lm', btn: 'btn_test_cheap', result: 'test_result_cheap' },
-    'dialogue':  { key: 'st_dlg_lk',   url: 'st_dlg_lb', model: 'st_dlg_lm',   btn: 'btn_test_dlg',     result: 'test_result_dlg' },
+    'dialogue': { key: 'st_dlg_lk', url: 'st_dlg_lb', model: 'st_dlg_lm', btn: 'btn_test_dlg', result: 'test_result_dlg' },
     'image':     { key: 'st_ik',       url: 'st_iu', model: 'st_im',          btn: 'btn_test_image',    result: 'test_result_image' },
     'embedding': { key: 'st_ek',       url: 'st_eu', model: 'st_em',          btn: 'btn_test_embedding', result: 'test_result_embedding' },
   };
@@ -522,14 +526,14 @@ async function clearAllKeys() {
     var res = await api('POST', '/api/clear-all-keys', {});
     if (res && res.status === 'ok') {
       // 同步清空前端 5 个输入框
-      var keyIds = ['st_lk', 'st_cheap_lk', 'st_dlg_lk', 'st_ik', 'st_ek'];
+      var keyIds = ['st_lk', 'st_dlg_lk', 'st_ik', 'st_ek'];
       keyIds.forEach(function(id) {
         var el = $(id);
         if (el) el.value = '';
       });
       // 如果有 Alpine 绑定，同步清空 config 对象
       if (window.settingsPanel && window.settingsPanel.config) {
-        ['llm', 'cheap_llm', 'dialogue_llm', 'image', 'embedding'].forEach(function(s) {
+        ['llm', 'dialogue_llm', 'image', 'embedding'].forEach(function(s) {
           if (window.settingsPanel.config[s]) window.settingsPanel.config[s].api_key = '';
         });
       }
@@ -556,29 +560,47 @@ async function clearAllKeys() {
 
 async function saveSettings() {
   var styleName = $('st_narrative_style').value;
-  var customText = styleName === '自定义' ? $('st_custom_style').value : '';
+  // [v1.5] 3 个自定义风格槽位：写入 config.narrative_styles 字典（后端 API 现成）
+  var CUSTOM_SLOTS = ['自定义1', '自定义2', '自定义3'];
+  for (var si = 0; si < CUSTOM_SLOTS.length; si++) {
+    var slotText = $('st_custom_style_' + (si + 1)).value.trim();
+    if (slotText) {
+      await api('POST', '/api/narrative-style/custom', { name: CUSTOM_SLOTS[si], description: slotText });
+    } else {
+      // 槽位清空 → 删除该自定义风格（不存在时报错可忽略）
+      try { await api('DELETE', '/api/narrative-style/custom/' + encodeURIComponent(CUSTOM_SLOTS[si])); } catch(e) {}
+    }
+  }
+  // [v1.5] 选中自定义N 时，custom_text 传对应槽位内容（向后兼容 narrative_style_custom）
+  // [Bugfix 2026-08-09] "自定义1".slice(2)="义1" 中文截断错误，必须用正则捕获组取槽位号
+  var _sm = /^自定义([123])$/.exec(styleName);
+  var customText = _sm ? $('st_custom_style_' + _sm[1]).value : '';
   // [Bug] 叙事视角
   var perspective = $('st_narrative_perspective').value;
-  
-  var styleRes = await api('POST', '/api/narrative-style', {style_name: styleName, custom_text: customText, narrative_perspective: perspective});
-  if (styleRes && styleRes.error) {
-    console.error('保存叙事风格失败', styleRes.error);
-  }
+
+  // [Bug修复] 必须在任何 await 之前收集 DOM 值，否则 await 期间 Alpine x-model
+  // 的 reactivity 可能用 this.config（页面加载时的旧值/空值）覆盖 input.value，
+  // 导致 collectConfigFromDOM 读取到被覆盖的空值（embedding key 丢失的根因）。
   var config = collectConfigFromDOM();
   var body = buildFullSettingsBody(config);
-  
+
   // [v11] 流式输出开关
   body.streaming_enabled = ($('st_streaming_enabled') || {checked: true}).checked;
 
   // 添加v10高级配置
   body.v10 = collectV10Settings();
-  
+
+  var styleRes = await api('POST', '/api/narrative-style', {style_name: styleName, custom_text: customText, narrative_perspective: perspective});
+  if (styleRes && styleRes.error) {
+    console.error('保存叙事风格失败', styleRes.error);
+  }
+
   var res = await api('POST', '/api/full-settings', body);
   if (res && res.error) {
     alert('保存失败：' + res.error);
     return;
   }
-  
+
   applyThemeConfig(config.ui);
   closeSettings();
 }
@@ -652,7 +674,7 @@ var STYLE_DESCRIPTIONS = {
 
 function onStyleChange() {
   var sel = $('st_narrative_style').value;
-  if (sel === '自定义') {
+  if (/^自定义[123]$/.test(sel)) {
     $('custom_style_section').style.display = 'block';
   } else {
     $('custom_style_section').style.display = 'none';
@@ -663,8 +685,11 @@ function onStyleChange() {
 function updateStylePreview() {
   var sel = $('st_narrative_style').value;
   var preview = $('style_desc_preview');
-  if (sel === '自定义') {
-    preview.textContent = '自定义模式：在下方文本框中描述你想要的写作风格，或上传风格文件。';
+  if (/^自定义[123]$/.test(sel)) {
+    var _pm = /^自定义([123])$/.exec(sel);
+    var idx = _pm ? parseInt(_pm[1], 10) : 1;
+    var ta = $('st_custom_style_' + idx);
+    preview.textContent = ta && ta.value.trim() ? ('自定义风格' + idx + '：' + ta.value) : ('自定义风格' + idx + '：尚未填写内容');
   } else {
     preview.textContent = STYLE_DESCRIPTIONS[sel] || '';
   }
@@ -688,11 +713,14 @@ async function handleStyleFile(input) {
     var resp = await fetch('/api/narrative-style/upload', { method: 'POST', body: fd, headers: headers });
     var d = await resp.json();
     if (d.error) { info.textContent = '❌ ' + d.error; return; }
-    // 将提取的风格填入自定义文本框
-    $('st_custom_style').value = d.extracted_style || d.text || '';
-    $('st_narrative_style').value = '自定义';
+    // 将提取的风格填入当前选中的自定义槽位（默认槽位1）
+    var sel = $('st_narrative_style').value;
+    var _hm = /^自定义([123])$/.exec(sel);
+    var idx = _hm ? parseInt(_hm[1], 10) : 1;
+    $('st_custom_style_' + idx).value = d.extracted_style || d.text || '';
+    $('st_narrative_style').value = '自定义' + idx;
     $('custom_style_section').style.display = 'block';
-    info.textContent = '✅ 已从 ' + file.name + ' 提取风格特征';
+    info.textContent = '✅ 已从 ' + file.name + ' 提取风格特征（填入自定义' + idx + '）';
     updateStylePreview();
   } catch(e) {
     info.textContent = '❌ 上传失败';

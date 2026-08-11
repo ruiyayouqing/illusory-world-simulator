@@ -116,6 +116,25 @@ class MemoryBriefManager:
         except Exception as e:
             logger.warning("Failed to write brief %s: %s", fname, e)
 
+    # [v12.1] 记忆层快照：撤销/重试时整体恢复 briefs 文件
+    def snapshot_files(self) -> dict:
+        """快照全部 briefs 文件内容（{文件名: 内容}）"""
+        result = {}
+        for fname in BRIEF_BUDGET:
+            fp = self.briefs_dir / fname
+            try:
+                result[fname] = fp.read_text(encoding="utf-8") if fp.exists() else ""
+            except Exception as e:
+                logger.warning("Failed to snapshot brief %s: %s", fname, e)
+                result[fname] = ""
+        return result
+
+    def restore_files(self, files: dict) -> None:
+        """从快照恢复 briefs 文件内容，并同步内存缓存"""
+        with self._lock:
+            for fname, content in (files or {}).items():
+                self._write_brief(fname, content or "")
+
     def _truncate_to_budget(self, content: str, fname: str) -> str:
         """按字符预算截断，保留完整段落。"""
         budget = BRIEF_BUDGET.get(fname, 1000)
@@ -373,7 +392,7 @@ class MemoryBriefManager:
         # 筛选核心 NPC：与玩家有过交互的（is_dormant=False，且有 impression_of_player 或关系）
         core_npcs = []
         for npc_id, npc in engine.npc_states.items():
-            if getattr(npc, "is_dormant", False):
+            if getattr(npc, "is_dormant", False) or getattr(npc, "hidden", False):
                 continue
             # 优先选有印象或关系的 NPC
             impressions = getattr(npc, "impression_of_player", []) or []
@@ -405,9 +424,16 @@ class MemoryBriefManager:
                 if rel.get("favorability"):
                     block_parts.append(f"好感度：{rel['favorability']}")
             # 印象（最近3条）
-            impressions = getattr(npc, "impression_of_player", []) or []
-            if impressions:
+            # [2026-08-10 Bug] impression_of_player 是 dict（含 memorable_interactions 列表），
+            # 旧代码直接 impressions[-3:] 对 dict 切片 → unhashable type: 'slice'，睡眠整合 NPC 档案失败
+            impressions = getattr(npc, "impression_of_player", {}) or {}
+            if isinstance(impressions, dict):
+                recent_imp = (impressions.get("memorable_interactions") or [])[-3:]
+            elif isinstance(impressions, list):
                 recent_imp = impressions[-3:]
+            else:
+                recent_imp = []
+            if recent_imp:
                 imp_text = "；".join(
                     imp.get("text", str(imp))[:60] if isinstance(imp, dict) else str(imp)[:60]
                     for imp in recent_imp

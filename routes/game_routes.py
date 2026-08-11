@@ -41,6 +41,8 @@ class LoadGameRequest(BaseModel):
 
 class PlayerInputRequest(BaseModel):
     input: str
+    # [v12.1] 重试标记：true 时后端先回滚到输入前快照再重新生成，不重复推进状态
+    retry: bool = False
 
 
 class GenerateWorldRequest(BaseModel):
@@ -280,6 +282,11 @@ async def player_input(req: PlayerInputRequest):
     try:
         # [v9] 使用并发锁防止多请求同时修改游戏状态
         async with engine._game_lock:
+            # [v12.1] 重试语义：先回滚到输入前快照，再重新生成（不重复推进状态）
+            if req.retry:
+                retry_result = await asyncio.to_thread(engine.retry_last_turn, req.input)
+                if not retry_result.get("success"):
+                    return {"error": retry_result.get("error", "重试失败，游戏状态未改变")}
             result = await asyncio.to_thread(engine.process_player_input, req.input)
             if hasattr(engine, 'npc_registry') and engine.npc_registry and result.get("narrative"):
                 day = engine.world_state.current_day if engine.world_state else 0

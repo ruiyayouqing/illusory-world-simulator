@@ -457,7 +457,7 @@ class TurnProcessorV2:
         这样能省下大量明显安全/明显不可能的回合的 LLM 调用。
         """
         eng = self.engine
-        if not eng.cheap_llm:
+        if not eng.llm:
             return None
 
         # 检查配置是否启用了行动校验
@@ -504,7 +504,7 @@ class TurnProcessorV2:
         )
 
         try:
-            result = eng.cheap_llm.chat(validation_prompt, temperature=0.1, max_tokens=500)
+            result = eng.llm.chat(validation_prompt, temperature=0.1, max_tokens=500)
             result = (result or "").strip()
             if result.upper().startswith("NO"):
                 reason = result[3:].strip().lstrip(":：").strip() or "该行动在当前世界中不可能实现"
@@ -837,6 +837,35 @@ class TurnProcessorV2:
 
     # ── [重构] 从 process() 抽取的子方法 ──────────────────────
 
+    def _build_plot_continuity_rules(self) -> str:
+        """[v12.5] 剧情承接铁律（通用，适用于所有世界）。
+
+        设计思路：不依赖关键词/词表判定场景（治标且误伤），而是让 LLM 严格
+        以玩家输入为最高剧情指令，结合上下文（当前 location/时间/上一轮结尾）
+        合理承接剧情。这是普适的写作规则，不含任何世界专属元素，对所有世界安全。
+
+        替代 v12.4 的两界关键词判定方案（已废弃）。
+        """
+        return (
+            "【剧情承接铁律 - 最高优先级】\n"
+            "1. 玩家输入是剧情的最高指令：你必须严格围绕玩家输入描述的情节展开，"
+            "不得擅自增加与输入冲突的剧情，不得忽略玩家输入中的关键情节。\n"
+            "2. 场景连续性：叙事必须严格承接当前状态（玩家所在位置、当前时间、"
+            "事件进展）与上一轮剧情结尾。若玩家输入明确描述了场景转换"
+            "（如\"回到某地\"\"来到某地\"\"醒来\"\"穿越\"\"离开\"），叙事必须跟随转换"
+            "并在后续保持该场景；若玩家未明确切换场景，必须停留在当前场景，"
+            "不得无故跳转。\n"
+            "3. 禁止与输入矛盾的情节：不得自行制造与玩家输入或上下文矛盾的"
+            "场景跳转、地点变换、时间跳跃、人物行为。\n"
+            "4. 【禁止编造前史】不得虚构玩家输入和上下文历史中**从未发生过**的"
+            "过去经历来充当角色的背景或解释现状。例如：上下文从未提到主角打工赚钱，"
+            "就不得编造\"昨天在码头扛麻袋挣了钱\"；主角物品的来源必须依据既有剧情"
+            "（如特殊能力、NPC赠予、剧情事件），不确定时写\"来历不明\"或留白，"
+            "绝不自行编造经历圆场。\n"
+            "5. 创作自由边界：你的自由度仅限于细节描写、对话、心理活动、动作展开，"
+            "不得改变玩家输入确定的地点、时间线、核心事件和世界归属。"
+        )
+
     def _build_fixed_prompt(self, player_input: str, rule_result) -> tuple:
         """构建回合固定 prompt，注入所有上下文（世界观/规则/风格/记忆/伏笔等）。
 
@@ -954,6 +983,12 @@ class TurnProcessorV2:
             if scene_hint:
                 fixed_prompt = fixed_prompt + "\n\n" + scene_hint
 
+        # [v12.5] 剧情承接铁律（通用，适用于所有世界）：让 LLM 严格以玩家输入为
+        # 最高剧情指令，结合上下文合理承接，取代 v12.4 的关键词场景判定方案
+        continuity = self._build_plot_continuity_rules()
+        if continuity:
+            fixed_prompt = fixed_prompt + "\n\n" + continuity
+
         return fixed_prompt, scene_type, time_anchor
 
     def _build_state_snapshot(self, eng) -> str:
@@ -1045,11 +1080,124 @@ class TurnProcessorV2:
             player_input, narrative, rule_result, impact, world_event
         )
 
+        # Step 14.10: [2026-08-10] 每轮生成 300 字剧情概况（分层记忆头部）→ 后台异步
+        try:
+            self._bg(self._generate_narrative_summary, player_input, narrative)
+        except Exception as e:
+            logger.debug("summary task schedule failed: %s", e)
+
         return {
             "review": {"skipped": True, "reason": "async_deferred"},
             "curator": {"skipped": True, "reason": "async_deferred"},
             "audit": {"skipped": True, "reason": "async_deferred"},
         }
+
+    def _detect_new_npcs(self, narrative: str):
+        """[已废弃 2026-08-10] B+C 自动检测误报率高（动词短语被当人名），
+        用户决定回归手动建档（给AI下命令 / 添加角色）。
+        保留方法体为空，避免历史引用报错。"""
+        return
+
+    # ── [2026-08-10] 剧情概况分层记忆（用户方案）──
+
+    def _get_summary_store(self, eng):
+        """懒加载概况存储（挂到引擎，世界切换时重建）。"""
+        store = getattr(eng, "_narrative_summaries", None)
+        wid = getattr(eng, "_narrative_summaries_world", None)
+        if store is None or wid != getattr(eng, "current_world_id", None):
+            try:
+                from .narrative_summaries import NarrativeSummaryStore
+                store = NarrativeSummaryStore(
+                    eng.current_world_id, eng.save_manager.base_dir
+                )
+            except Exception as e:
+                logger.warning("NarrativeSummaryStore 初始化失败: %s", e)
+                store = None
+            eng._narrative_summaries = store
+            eng._narrative_summaries_world = getattr(eng, "current_world_id", None)
+        return store
+
+    def _build_summary_head(self, eng) -> str:
+        """构建普通叙事的概况/纪要头部（早期剧情脉络）。"""
+        store = self._get_summary_store(eng)
+        if not store:
+            return ""
+        try:
+            # 头部预算约 6.5 万中文字（≈10 万 token），剩余给尾部原文/设定/档案
+            return store.build_head_text(max_chars=65000)
+        except Exception as e:
+            logger.debug("build_summary_head 失败: %s", e)
+            return ""
+
+    def _generate_narrative_summary(self, player_input: str, narrative: str):
+        """每轮叙事 → 300 字剧情概况（统一走主 LLM，失败静默跳过）。"""
+        eng = self.engine
+        store = self._get_summary_store(eng)
+        if not store or not narrative:
+            return
+        # [2026-08-10] 备用模型已禁用，统一走主 LLM
+        llm = eng.llm
+        if not llm:
+            return
+        try:
+            prompt = (
+                "请为以下游戏叙事写一段约300字的剧情概况。\n"
+                "\n"
+                "【要求】\n"
+                "1. 包含：时间地点、关键事件、出场人物及关系变化、伏笔悬念\n"
+                "2. 只陈述事实脉络，不要文学化描写、不要抒情\n"
+                "3. 250-350字\n"
+                "\n"
+                f"【玩家行动】{player_input[:1500]}\n"  # [2026-08-10] 200→1500：概况需含完整玩家行动，截断会丢关键情节
+                f"【叙事】{narrative[:4000]}\n"
+                "\n"
+                "直接输出概况："
+            )
+            summary = llm.chat(prompt, temperature=0.3, max_tokens=500)
+            summary = (summary or "").strip()
+            if len(summary) < 50:
+                return
+            turn = eng.meta.current_turn if eng.meta else 0
+            day = eng.world_state.current_day if eng.world_state else 1
+            store.add_summary(turn, day, summary)
+            logger.info("剧情概况已生成: 轮%d 第%d天 (%d字)", turn, day, len(summary))
+            self._maybe_compress_chunks(eng, store)
+        except Exception as e:
+            logger.debug("narrative summary 生成失败: %s", e)
+
+    def _maybe_compress_chunks(self, eng, store):
+        """概况满 100 条 → 主 LLM 压缩成 ~2 万字 chunk，成功后删除已压缩概况。"""
+        try:
+            rows = store.uncompressed_summaries()
+            if len(rows) < 100:
+                return
+            text = "\n".join(
+                f"[第{r['day']}天 · 轮{r['turn']}] {r['summary']}" for r in rows
+            )
+            prompt = (
+                "请将以下100条游戏剧情概况合并压缩成一份约2万字的【剧情纪要】，供后续创作参考。\n"
+                "\n"
+                "【要求】\n"
+                "1. 严格按时间线组织，保留关键事件、人物关系变化、重要伏笔的完整脉络\n"
+                "2. 保留具体人名、地名、因果链；压缩比为原文的60%-70%（100条概况约3万字 → 约2万字）\n"
+                "3. 只陈述事实脉络，不文学化\n"
+                "\n"
+                f"【剧情概况（100条）】\n{text}\n"
+                "\n"
+                "直接输出剧情纪要："
+            )
+            chunk_text = eng.llm.chat(prompt, temperature=0.3, max_tokens=30000)
+            chunk_text = (chunk_text or "").strip()
+            if len(chunk_text) < 2000:
+                logger.warning("chunk 压缩结果过短(%d字)，放弃本次压缩", len(chunk_text))
+                return
+            start_id = rows[0]["id"]
+            end_id = rows[-1]["id"]
+            store.add_chunk(start_id, end_id, chunk_text)
+            store.delete_summaries_upto(end_id)
+            logger.info("剧情纪要已生成: 概况#%d~#%d (%d字)", start_id, end_id, len(chunk_text))
+        except Exception as e:
+            logger.warning("chunk 压缩失败: %s", e)
 
     def _generate_from_template(self, intent, player_input, npc_names, fixed_prompt, scene_type=None, time_anchor: str = "") -> tuple:
         """模板生成（不需要LLM）"""
@@ -1192,17 +1340,24 @@ class TurnProcessorV2:
                             _lm_count, _lm_min, _retry + 1,
                         )
                         try:
+                            # [v12.3] 续写防重复：明确"已写内容"是锚点而非重写起点，并把当前叙事注入历史
+                            _cont_tail = narrative[-300:]
                             _lm_continue = (
-                                f"[续写] 上一段叙事太短（只有{_lm_count}字），"
-                                f"请从以下位置接着写，至少再写{_lm_min - _lm_count}字：\n"
-                                f"……{narrative[-200:]}"
+                                f"[续写] 上一段叙事太短（只有{_lm_count}字），未达要求。"
+                                f"以下是【已写内容】的结尾部分：\n"
+                                f"……{_cont_tail}\n"
+                                f"请严格接着【已写内容】结尾之后的情节继续写，至少再写{_lm_min - _lm_count}字。"
+                                f"【铁律】绝对禁止重复、复述、改写【已写内容】中出现过的任何句子、场景、动作或对话，"
+                                f"直接从结尾之后的新情节开始，不要回头描写已发生的事。"
                             )
+                            _cont_history = list(_light_history or [])
+                            _cont_history.append({"player_input": player_input, "text": narrative[-1500:]})
                             token_gen2 = eng.player_agent.generate_narrative_stream(
                                 eng.player_state, _lm_continue,
                                 world_state=eng.world_state.model_dump() if eng.world_state else None,
                                 day=eng.world_state.current_day if eng.world_state else 1,
                                 npc_states=eng.npc_states,
-                                narrative_history=_light_history,
+                                narrative_history=_cont_history,
                                 fixed_prompt=fixed_prompt,
                                 max_context=_light_max_ctx,
                                 scene_type=scene_type,
@@ -1322,6 +1477,7 @@ class TurnProcessorV2:
                     scene_type=scene_type,
                     narrative_max_chars=_narrative_max,
                     time_anchor=time_anchor,
+                    summary_head=self._build_summary_head(eng),
                 )
                 for token in token_gen:
                     if token:
@@ -1342,22 +1498,30 @@ class TurnProcessorV2:
                     try:
                         # [Bug#10] 续写必须保留系统prompt和身份锚定，使用 generate_narrative_stream
                         # 而非直接调用 llm.chat_stream（后者缺少世界观/NPC/身份上下文）
+                        # [v12.3] 续写防重复：明确"已写内容"是锚点而非重写起点，并把当前叙事注入历史
+                        _cont_tail = narrative[-300:]
                         continue_input = (
-                            f"[续写] 上一段叙事太短（只有{_narr_char_count}字），"
-                            f"请从以下位置接着写，至少再写{_narrative_min - _narr_char_count}字：\n"
-                            f"……{narrative[-200:]}"
+                            f"[续写] 上一段叙事太短（只有{_narr_char_count}字），未达要求。"
+                            f"以下是【已写内容】的结尾部分：\n"
+                            f"……{_cont_tail}\n"
+                            f"请严格接着【已写内容】结尾之后的情节继续写，至少再写{_narrative_min - _narr_char_count}字。"
+                            f"【铁律】绝对禁止重复、复述、改写【已写内容】中出现过的任何句子、场景、动作或对话，"
+                            f"直接从结尾之后的新情节开始，不要回头描写已发生的事。"
                         )
+                        _cont_history = list(eng.narrative_history or [])
+                        _cont_history.append({"player_input": player_input, "text": narrative[-1500:]})
                         continue_gen = eng.player_agent.generate_narrative_stream(
                             eng.player_state, continue_input,
                             world_state=eng.world_state.model_dump() if eng.world_state else None,
                             day=eng.world_state.current_day if eng.world_state else 1,
                             npc_states=eng.npc_states,
-                            narrative_history=eng.narrative_history,
+                            narrative_history=_cont_history,
                             fixed_prompt=fixed_prompt,
                             max_context=eng._get_max_context(),
                             scene_type=scene_type,
                             narrative_max_chars=_narrative_min,
                             time_anchor=time_anchor,
+                            summary_head=self._build_summary_head(eng),
                         )
                         for token in continue_gen:
                             if token:
@@ -1574,6 +1738,7 @@ class TurnProcessorV2:
                 character_state=character_state,
                 scene_type=scene_type.value if scene_type else "",
                 style=style,
+                narrative_max_chars=getattr(eng, 'narrative_max_chars', 2000),
             )
             narrative = draft.final_narrative or ""
         except Exception as e:
@@ -1585,10 +1750,64 @@ class TurnProcessorV2:
 
         # 清理叙事文本（去除可能的 JSON 包裹/前缀）
         if eng.player_agent:
-            narrative = eng.player_agent._clean_narrative(narrative)
+            # [v12.6] 与 full/light 路径一致：受"允许旁白"设置控制（strip_gray=False 时跳过清理，避免误杀正文）
+            if eng._get_strip_gray_narrative():
+                narrative = eng.player_agent._clean_narrative(narrative)
             # [v12] 清除AI时间跳跃标记
             if narrative:
                 narrative = self._strip_time_skip_tag(narrative)
+
+        # [v12.2] 多智能体字数不足自动续写：叙事低于目标的90%就续写，最多3轮
+        # 多智能体 writer 的 max_tokens 已放宽，但模型仍可能提前收尾，需兜底
+        _ma_max = getattr(eng, 'narrative_max_chars', 2000)
+        _ma_min = int(_ma_max * 0.66)
+        _ma_count = len(narrative)
+        _ma_retry = 0
+        while (_ma_count > 0
+                and _ma_count < int(_ma_min * 0.9)
+                and _ma_retry < 3):
+            logger.info(
+                "多智能体叙事字数不足 (%d < %d 的90%%)，第%d轮自动续写补充",
+                _ma_count, _ma_min, _ma_retry + 1,
+            )
+            try:
+                # [v12.3] 续写防重复：明确"已写内容"是锚点而非重写起点，
+                # 并把当前叙事注入历史，让 LLM 看到完整前文避免重复
+                _cont_tail = narrative[-300:]
+                continue_input = (
+                    f"[续写] 上一段叙事太短（只有{_ma_count}字），未达要求。"
+                    f"以下是【已写内容】的结尾部分：\n"
+                    f"……{_cont_tail}\n"
+                    f"请严格接着【已写内容】结尾之后的情节继续写，至少再写{_ma_min - _ma_count}字。"
+                    f"【铁律】绝对禁止重复、复述、改写【已写内容】中出现过的任何句子、场景、动作或对话，"
+                    f"直接从结尾之后的新情节开始，不要回头描写已发生的事。"
+                )
+                _cont_history = list(eng.narrative_history or [])
+                _cont_history.append({"player_input": player_input, "text": narrative[-1500:]})
+                continue_gen = eng.player_agent.generate_narrative_stream(
+                    eng.player_state, continue_input,
+                    world_state=eng.world_state.model_dump() if eng.world_state else None,
+                    day=eng.world_state.current_day if eng.world_state else 1,
+                    npc_states=eng.npc_states,
+                    narrative_history=_cont_history,
+                    fixed_prompt=fixed_prompt,
+                    max_context=eng._get_max_context(),
+                    scene_type=scene_type,
+                    narrative_max_chars=_ma_min,
+                    time_anchor=time_anchor,
+                    summary_head=self._build_summary_head(eng),
+                )
+                for token in continue_gen:
+                    if token:
+                        narrative += token
+                # 注意：不在此处逐 token 回调——多智能体路径在下方一次性
+                # _stream_callback(narrative) 发送完整叙事，逐 token 发会造成重复
+                logger.info("多智能体第%d轮续写完成，总字数: %d", _ma_retry + 1, len(narrative))
+            except Exception as e:
+                logger.warning("多智能体叙事续写失败: %s", e, exc_info=True)
+                break
+            _ma_count = len(narrative)
+            _ma_retry += 1
 
         # 流式回调：一次性发送完整叙事
         if eng._stream_callback and narrative:
@@ -1687,6 +1906,20 @@ class TurnProcessorV2:
             db_path.parent.mkdir(parents=True, exist_ok=True)
 
             history_mgr = StateHistoryManager(db_path)
+            # [v12.7] 辅助状态快照：npc_registry（认识状态/knowledge）与
+            # character_state_manager（角色状态变化记录）不在 player/world/npc 快照内，
+            # 若不快照，undo/retry 回滚后这些状态会残留（如被删轮次创建的 NPC 认识记录）
+            aux_state = {}
+            try:
+                if eng.npc_registry:
+                    aux_state["npc_registry"] = eng.npc_registry.to_dict()
+            except Exception as _e:
+                logger.debug("npc_registry 序列化失败: %s", _e)
+            try:
+                if eng.character_state_manager:
+                    aux_state["character_state_manager"] = eng.character_state_manager.to_dict()
+            except Exception as _e:
+                logger.debug("character_state_manager 序列化失败: %s", _e)
             history_mgr.save_snapshot(
                 world_id=eng.current_world_id,
                 turn=eng.meta.current_turn,
@@ -1698,6 +1931,7 @@ class TurnProcessorV2:
                 narrative=narrative or "",
                 player_input=player_input,
                 diff_summary="；".join(rule_result.narrative_hints) if rule_result.narrative_hints else "",
+                aux_state=aux_state,
             )
 
             # 同时保存叙事记录
@@ -2072,6 +2306,7 @@ class TurnProcessorV2:
                 energy_cost=10,
                 day=eng.world_state.current_day if eng.world_state else 0,
                 location=npc.current_location or "",
+                turn=eng.meta.current_turn if eng.meta else -1,
             )
 
     def _infer_npc_action_type(self, narrative: str, npc_name: str) -> str:
@@ -2857,6 +3092,19 @@ class TurnProcessorV2:
                 # 只分析叙事中提到的 NPC
                 if npc.name not in narrative:
                     continue
+                # [v12.7] 更新出场时间戳：首次出场记 first_seen，每次出场更新 last_seen。
+                # 世界初始 NPC（first_seen_turn=-1）不记 first_seen（保持 -1 = 世界固有，
+                # 回滚永不删除）；仅记录 last_seen 供回滚时恢复出场记录。
+                try:
+                    if npc.first_seen_turn == -1 and npc.original_chapter == -1:
+                        # 世界固有 NPC：不设置 first_seen（保持 -1），只更新 last_seen
+                        npc.last_seen_turn = current_turn
+                    else:
+                        if npc.first_seen_turn == -1:
+                            npc.first_seen_turn = current_turn
+                        npc.last_seen_turn = current_turn
+                except Exception as _e:
+                    logger.debug("NPC %s 时间戳更新失败: %s", npc.name, _e)
                 try:
                     eng.character_state_manager.analyze_changes_from_narrative(
                         npc_id, narrative, current_turn, current_day

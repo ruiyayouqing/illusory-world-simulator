@@ -242,7 +242,8 @@ class NpcReactionEngine:
             if npc_id == actor_id:
                 continue
             # 跳过休眠/已故/昏迷
-            if getattr(npc, "is_dormant", False):
+            # [功能二] 跳过玩家手动隐藏的 NPC
+            if getattr(npc, "is_dormant", False) or getattr(npc, "hidden", False):
                 continue
             if "已故" in (npc.tags or []):
                 continue

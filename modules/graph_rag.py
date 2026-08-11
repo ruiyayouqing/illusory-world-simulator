@@ -363,7 +363,7 @@ class GraphRAG:
             # 单次 prompt 同时提取实体和关系
             prompt = EXTRACT_BATCH_PROMPT.format(text=narrative[:6000])
             result = self.llm.chat_json(
-                prompt, temperature=0.2, max_tokens=0,
+                prompt, temperature=0.2, max_tokens=30000,
                 schema_hint=EXTRACT_BATCH_SCHEMA_HINT,
             )
 
@@ -449,7 +449,7 @@ class GraphRAG:
 
         try:
             result = self.llm.chat_json(
-                prompt, temperature=0.1, max_tokens=0,
+                prompt, temperature=0.1, max_tokens=30000,
                 schema_hint=CONFIRM_CHARACTERS_SCHEMA_HINT,
             )
             confirmed = result.get("characters", [])
@@ -1142,7 +1142,7 @@ class GraphRAG:
         prompt = EXTRACT_ENTITIES_PROMPT.format(text=text[:3000])
         # [v12修复] 传入 schema_hint 避免被 chat_json 强制改为游戏叙事格式
         result = self.llm.chat_json(
-            prompt, temperature=0.2, max_tokens=0,
+            prompt, temperature=0.2, max_tokens=30000,
             schema_hint=EXTRACT_ENTITIES_SCHEMA_HINT,
         )
         return result.get("entities", [])
@@ -1156,7 +1156,7 @@ class GraphRAG:
             entities_text=entities_text, text=text[:3000]
         )
         result = self.llm.chat_json(
-            prompt, temperature=0.2, max_tokens=0,
+            prompt, temperature=0.2, max_tokens=30000,
             schema_hint=EXTRACT_RELATIONS_SCHEMA_HINT,
         )
         return result.get("relations", [])

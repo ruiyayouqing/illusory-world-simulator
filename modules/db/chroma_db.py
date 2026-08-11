@@ -75,6 +75,43 @@ class MemoryStore:
         except Exception as e:
             return {"status": "error", "error": str(e), "path": self.persist_dir}
 
+    # [v12.1] 记忆层快照辅助：撤销/重试时按 ID 集合整体回滚 chroma
+    _SNAPSHOT_COLLECTIONS = (
+        "collection", "npc_collection", "foreshadow_collection", "identity_collection",
+        "novel_facts_collection", "player_events_collection", "causal_events_collection",
+    )
+
+    def get_collection_ids_snapshot(self) -> dict:
+        """快照所有 collection 的文档 ID（{属性名: [ids]}），供记忆层回滚"""
+        result = {}
+        for attr in self._SNAPSHOT_COLLECTIONS:
+            col = getattr(self, attr, None)
+            if col is None:
+                continue
+            try:
+                res = col.get(include=[])
+                result[attr] = list(res.get("ids", [])) if res else []
+            except Exception as e:
+                logger.warning("MemoryStore snapshot %s failed: %s", attr, e)
+                result[attr] = []
+        return result
+
+    def delete_collection_ids(self, ids_map: dict) -> int:
+        """按 collection 删除指定 ID 的文档（{属性名: [ids]}），返回删除总数"""
+        total = 0
+        for attr, ids in (ids_map or {}).items():
+            if not ids:
+                continue
+            col = getattr(self, attr, None)
+            if col is None:
+                continue
+            try:
+                col.delete(ids=ids)
+                total += len(ids)
+            except Exception as e:
+                logger.warning("MemoryStore delete %s (%d ids) failed: %s", attr, len(ids), e)
+        return total
+
     def _get_or_create_with_migration(self, name: str, embedding_function):
         """[v10.5] 获取或创建 collection，处理 embedding function 冲突。
         若现有 collection 用旧嵌入模型（如 default）创建，而新 ef 不同，

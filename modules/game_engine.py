@@ -870,7 +870,8 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
 
     def _get_max_context(self) -> int:
         config = self._load_config()
-        return config.get("game", {}).get("max_context", 32768)
+        # [2026-08-10] 默认 32768 → 150000（1M 上下文模型，分层记忆架构预算）
+        return config.get("game", {}).get("max_context", 150000)
 
     def _get_narrative_max_chars(self) -> int:
         """[v10.6] 获取叙事最大字数（从 config.game.narrative_max_chars 读取，默认 1000）"""
@@ -931,20 +932,9 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             runtime_cfg=runtime_cfg,
         )
 
-        if c_key and c_url and c_model:
-            try:
-                self.cheap_llm = MimoLLM(
-                    api_key=c_key,
-                    base_url=c_url,
-                    model_name=c_model,
-                    runtime_cfg=runtime_cfg,
-                )
-                logger.info("Cheap/fallback LLM configured: %s @ %s", c_model, c_url)
-            except Exception as e:
-                logger.warning("Failed to init cheap LLM: %s", e, exc_info=True)
-                self.cheap_llm = None
-        else:
-            self.cheap_llm = None
+        # [2026-08-10] 备用模型（cheap_llm）已禁用：所有调用统一走主模型，减少配置出错面
+        self.cheap_llm = None
+        logger.info("Cheap LLM disabled, all tasks route to main model")
 
         # [v11] 对话模型已屏蔽，所有内容走主力模型
         self.dialogue_llm = None
@@ -1296,9 +1286,39 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         保留原方法签名以保持向后兼容。
         注意：并发安全由调用方（game_routes.py）通过 _game_lock 保证。
         [v1.7 P2-2] 关键路径保护：TurnProcessor 异常时降级返回，不让玩家卡死。
+        [v12.7] 相同输入自动重试兜底：若本次输入与 narrative_history 最后一条
+        narrative 记录的 player_input 完全相同（strip 后），视为用户想要"重新生成"
+        而非新行动——自动回滚上一轮再生成，避免手动重发产生重复轮次。
         """
         if not self._turn_processor:
             raise RuntimeError("TurnProcessorV2 未初始化，请先调用 init_llm()")
+
+        # [v12.7] 相同输入自动重试：手动重发相同文字在旧版会被当作新的一轮，
+        # 导致 history 累积重复（加载存档后界面出现两个相同行动输入）。
+        # 检测：最后一条 narrative 的 player_input 与本次完全相同 → 自动 retry 语义
+        try:
+            _in = (player_input or "").strip()
+            _last_narr_input = ""
+            for _h in reversed(self.narrative_history):
+                if _h.get("type") == "narrative" and _h.get("player_input"):
+                    _last_narr_input = str(_h.get("player_input", "")).strip()
+                    break
+            if _in and _last_narr_input and _in == _last_narr_input:
+                logger.info(
+                    "[v12.7] 检测到与上一轮完全相同的输入，自动按重试语义处理: %s",
+                    _in[:30],
+                )
+                try:
+                    _retry_ret = self.retry_last_turn(_in)
+                    if isinstance(_retry_ret, dict) and not _retry_ret.get("success"):
+                        logger.warning(
+                            "[v12.7] 自动重试回滚失败（%s），按普通输入处理",
+                            _retry_ret.get("error"),
+                        )
+                except Exception as _re:
+                    logger.warning("[v12.7] 自动重试回滚异常，按普通输入处理: %s", _re)
+        except Exception as _e:
+            logger.debug("[v12.7] 相同输入检测跳过: %s", _e)
 
         try:
             result = self._turn_processor.process(player_input)
@@ -1404,7 +1424,7 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             if self.npc_states:
                 for nid, npc in self.npc_states.items():
                     # 仅对在场、非休眠的活跃 NPC 应用情感更新
-                    if getattr(npc, 'is_dormant', False):
+                    if getattr(npc, 'is_dormant', False) or getattr(npc, 'hidden', False):
                         continue
                     # 只对叙事文本中实际提到名字的NPC更新情感
                     if npc.name and npc.name in full_text:
@@ -1445,7 +1465,288 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
                 )
             self._bg(_run_post_parallel)
 
+        # [v12.1] 回合结束：快照记忆层（chroma/briefs/摘要/事件日志/NPC记忆）
+        self._capture_memory_snapshot()
+
         return result
+
+    # ── [v12.1] 记忆层快照与回滚（撤销/重试整体清除记忆写入，防止污染后续剧情） ──
+
+    def _capture_memory_snapshot(self) -> None:
+        """回合结束时快照记忆层状态：chroma 文档 ID 集合 + briefs 文件 + 历史摘要 +
+        事件日志游标 + NPC程序性记忆。使 undo/retry 能整体恢复到目标回合的记忆状态。"""
+        try:
+            if not self.current_world_id:
+                return
+            from .state_history import StateHistoryManager
+            mgr = StateHistoryManager(Path("saves") / self.current_world_id / "history.db")
+            turn = self.meta.current_turn
+            chroma_ids = self.memory.get_collection_ids_snapshot() if self.memory else {}
+            briefs = self.memory_brief.snapshot_files() if self.memory_brief else {}
+            summaries = []
+            if self.memory_curator:
+                summaries = list(getattr(self.memory_curator, "_history_summaries", []) or [])
+            mgr.save_memory_snapshot(
+                world_id=self.current_world_id, turn=turn,
+                chroma_ids=chroma_ids, briefs=briefs, summaries=summaries,
+                event_max_id=self._get_event_log_max_id(),
+                npc_procedural=self._serialize_npc_procedural(),
+            )
+        except Exception as e:
+            logger.warning("Memory snapshot failed: %s", e, exc_info=True)
+
+    def _restore_memory_snapshot(self, target_turn: int) -> dict:
+        """恢复到 target_turn 的记忆层快照：删除其后所有 chroma 文档/briefs 变更/
+        摘要/事件日志/NPC记忆，并清空 pending 后处理任务（绝对清除，不残留）。"""
+        if not self.current_world_id:
+            return {"success": False, "error": "当前世界未初始化"}
+        try:
+            from .state_history import StateHistoryManager
+            mgr = StateHistoryManager(Path("saves") / self.current_world_id / "history.db")
+            snap = mgr.get_memory_snapshot(self.current_world_id, target_turn)
+            if not snap:
+                logger.warning("Memory snapshot turn=%d 不存在，记忆层无法回滚", target_turn)
+                return {"success": False, "error": f"turn={target_turn} 无记忆快照"}
+            # 1. chroma 差集删除（当前有而快照没有的文档 = 被撤销回合的写入）
+            if self.memory:
+                try:
+                    current = self.memory.get_collection_ids_snapshot()
+                    delete_map = {}
+                    for attr, ids in (snap.get("chroma_ids") or {}).items():
+                        cur_set = set(current.get(attr, []) or [])
+                        extra = list(cur_set - set(ids or []))
+                        if extra:
+                            delete_map[attr] = extra
+                    if delete_map:
+                        n = self.memory.delete_collection_ids(delete_map)
+                        logger.info("Memory rollback: 删除 chroma 文档 %d 条（回滚到 turn %d）", n, target_turn)
+                except Exception as e:
+                    logger.warning("Memory rollback chroma failed: %s", e, exc_info=True)
+            # 2. briefs 文件恢复
+            if self.memory_brief and snap.get("briefs"):
+                try:
+                    self.memory_brief.restore_files(snap["briefs"])
+                    if hasattr(self.memory_brief, "_last_incremental_turn"):
+                        self.memory_brief._last_incremental_turn = target_turn
+                except Exception as e:
+                    logger.warning("Memory rollback briefs failed: %s", e, exc_info=True)
+            # 3. 历史摘要恢复
+            if self.memory_curator:
+                try:
+                    self.memory_curator._history_summaries = list(snap.get("summaries") or [])
+                except Exception as e:
+                    logger.warning("Memory rollback summaries failed: %s", e, exc_info=True)
+            # 3.5 剧情概况回滚（narrative_summaries 表：删除 target_turn 之后的概况）
+            # [2026-08-10 Bug] 撤销/重试后剧情概况未同步回滚，旧轮次概况残留污染记忆头部
+            try:
+                store = getattr(self, "_narrative_summaries", None)
+                if store is None or getattr(self, "_narrative_summaries_world", None) != self.current_world_id:
+                    from .narrative_summaries import NarrativeSummaryStore
+                    store = NarrativeSummaryStore(self.current_world_id, self.save_manager.base_dir)
+                    self._narrative_summaries = store
+                    self._narrative_summaries_world = self.current_world_id
+                n_del = store.delete_after_turn(target_turn) if store else 0
+                if n_del:
+                    logger.info("Memory rollback: 删除剧情概况 %d 条（回滚到 turn %d）", n_del, target_turn)
+            except Exception as e:
+                logger.warning("Memory rollback narrative_summaries failed: %s", e, exc_info=True)
+            # 4. 事件日志回滚
+            self._delete_event_log_after(snap.get("event_max_id") or 0)
+            # 5. NPC 程序性记忆恢复
+            self._restore_npc_procedural(snap.get("npc_procedural") or "")
+            # 6. 清空 pending 后处理（被撤销回合的写入不再执行）
+            if self.task_queue:
+                try:
+                    self.task_queue.clear()
+                except Exception as e:
+                    logger.warning("Task queue clear failed: %s", e)
+            # 7. 删除 target 之后的记忆快照（保持一致）
+            try:
+                mgr.delete_memory_snapshots_after(self.current_world_id, target_turn)
+            except Exception as e:
+                logger.warning("Delete old memory snapshots failed: %s", e)
+            return {"success": True, "turn": target_turn}
+        except Exception as e:
+            logger.error("Memory rollback failed: %s", e, exc_info=True)
+            return {"success": False, "error": f"记忆层回滚失败: {e}"}
+
+    def _get_event_log_max_id(self) -> int:
+        try:
+            import sqlite3 as _sq
+            con = _sq.connect(Path("saves") / self.current_world_id / "logs" / "event_log.db")
+            row = con.execute("SELECT MAX(id) FROM events").fetchone()
+            con.close()
+            return row[0] if row and row[0] else 0
+        except Exception:
+            return 0
+
+    def _delete_event_log_after(self, max_id: int) -> None:
+        try:
+            import sqlite3 as _sq
+            con = _sq.connect(Path("saves") / self.current_world_id / "logs" / "event_log.db")
+            cur = con.execute("DELETE FROM events WHERE id > ?", (int(max_id),))
+            n = cur.rowcount
+            con.commit()
+            con.close()
+            if n:
+                logger.info("Memory rollback: 删除事件日志 %d 条", n)
+        except Exception as e:
+            logger.warning("Delete event log failed: %s", e)
+
+    def _serialize_npc_procedural(self) -> str:
+        """序列化 NPC 程序性记忆（纯内存，快照用于回滚）"""
+        try:
+            mem = None
+            if self.npc_procedural_memory:
+                mem = getattr(self.npc_procedural_memory, "_memories", None)
+            if not mem:
+                return ""
+            out = {}
+            for nid, entries in mem.items():
+                out[nid] = [e.to_dict() if hasattr(e, "to_dict") else dict(e) for e in entries]
+            return json.dumps(out, ensure_ascii=False)
+        except Exception as e:
+            logger.warning("Serialize npc_procedural failed: %s", e)
+            return ""
+
+    def _restore_npc_procedural(self, blob: str) -> None:
+        if not blob or not self.npc_procedural_memory:
+            return
+        try:
+            from .npc_procedural_memory import ProceduralEntry
+            data = json.loads(blob)
+            mem = {}
+            for nid, entries in data.items():
+                mem[nid] = [ProceduralEntry(**e) for e in entries]
+            self.npc_procedural_memory._memories = mem
+        except Exception as e:
+            logger.warning("Restore npc_procedural failed: %s", e)
+
+    def _restore_snapshot_from_turn(self, target_turn: int) -> dict:
+        """[v12.1] 从 history.db 恢复指定 turn 的状态快照（undo/retry 共用）。
+
+        成功时：player_state/world_state/npc_states 已恢复，meta.current_turn 已设为 target_turn。
+        返回 dict 含 history_mgr 供调用方继续清理历史记录。
+        """
+        if not self.current_world_id:
+            return {"success": False, "error": "当前世界未初始化"}
+        try:
+            from .state_history import StateHistoryManager
+            db_path = Path("saves") / self.current_world_id / "history.db"
+            if not db_path.exists():
+                return {"success": False, "error": "找不到状态历史（history.db 不存在）"}
+            history_mgr = StateHistoryManager(db_path)
+            snap = history_mgr.get_snapshot(self.current_world_id, target_turn)
+        except Exception as e:
+            logger.error("Restore snapshot: 读取历史快照失败: %s", e, exc_info=True)
+            return {"success": False, "error": f"读取历史快照失败: {e}"}
+        if not snap or not snap.player_state or not snap.world_state:
+            return {"success": False, "error": f"找不到 turn={target_turn} 的状态快照"}
+        try:
+            self.player_state = PlayerState(**snap.player_state)
+            self.world_state = WorldState(**snap.world_state)
+            self.npc_states = {}
+            for k, v in (snap.npc_states or {}).items():
+                self.npc_states[k] = NPCState(**v)
+            self.meta.current_turn = target_turn
+
+            # [v12.7] 时间戳过滤：清理"回滚窗口内新增/出场"的 NPC 痕迹
+            # 1) 首次出场 turn > target 的 NPC（该轮新增的轮次角色）→ 从 npc_states 移除
+            #    （world 初始 NPC first_seen_turn=-1 永不删除）
+            # 2) last_seen_turn > target 的 NPC → 恢复 last_seen_turn=target（出场记录回退）
+            try:
+                removed_npcs = []
+                for k, npc in list(self.npc_states.items()):
+                    if npc.first_seen_turn > target_turn:
+                        removed_npcs.append(k)
+                        del self.npc_states[k]
+                    elif npc.last_seen_turn > target_turn:
+                        npc.last_seen_turn = target_turn
+                if removed_npcs:
+                    logger.info("Restore snapshot: 移除回滚窗口内新增 NPC %d 个: %s",
+                                len(removed_npcs), removed_npcs)
+            except Exception as _ts_e:
+                logger.warning("Restore snapshot: NPC 时间戳过滤失败: %s", _ts_e, exc_info=True)
+
+            # [v12.7] 恢复辅助状态：npc_registry（认识状态/knowledge/谣言）与
+            # character_state_manager（角色状态变化记录）。这两者持久化在
+            # game_state.json 且不在 player/world/npc 快照内——若不恢复，
+            # undo/retry 回滚后它们残留（被删轮次里出现的 NPC 认识记录、
+            # 状态变化会永久留在状态里，污染后续生成）。
+            try:
+                aux = snap.aux_state or {}
+                if aux.get("npc_registry") and self.npc_registry:
+                    from .npc_registry import NpcRegistry
+                    self.npc_registry = NpcRegistry.from_dict(aux["npc_registry"])
+                    logger.info("Restore snapshot: 已恢复 npc_registry（turn=%d）", target_turn)
+                if aux.get("character_state_manager") and self.character_state_manager:
+                    self.character_state_manager.from_dict(aux["character_state_manager"])
+                    # [v12.7] 变化记录按轮过滤：删除 turn > target 的 change_history，
+                    # 清空后移除该角色（该轮新增的角色状态记录一并消失）
+                    try:
+                        csm = self.character_state_manager
+                        for cid in list(csm._states.keys()):
+                            st = csm._states[cid]
+                            if hasattr(st, "change_history"):
+                                st.change_history = [c for c in st.change_history
+                                                     if getattr(c, "turn", 0) <= target_turn]
+                            # 若该角色没有任何变化记录且是 player 之外的角色 → 删除空壳
+                            if cid != "player_01" and not getattr(st, "change_history", []):
+                                del csm._states[cid]
+                    except Exception as _cs_e:
+                        logger.warning("Restore snapshot: CSM 按轮过滤失败: %s", _cs_e, exc_info=True)
+                    logger.info("Restore snapshot: 已恢复 character_state_manager（turn=%d）", target_turn)
+            except Exception as _aux_e:
+                logger.warning("Restore snapshot: 辅助状态恢复失败: %s", _aux_e, exc_info=True)
+
+            # [v12.7] NPC 程序性记忆按轮清理：删除 turn > target 的条目
+            try:
+                if self.npc_procedural_memory and hasattr(self.npc_procedural_memory, "_memories"):
+                    npm = self.npc_procedural_memory._memories
+                    for nid in list(npm.keys()):
+                        before = len(npm[nid])
+                        npm[nid] = [e for e in npm[nid]
+                                    if getattr(e, "turn", -1) <= target_turn or getattr(e, "turn", -1) == -1]
+                        if not npm[nid]:
+                            del npm[nid]
+                        elif len(npm[nid]) != before:
+                            logger.info("Restore snapshot: npc_procedural_memory[%s] %d→%d 条", nid, before, len(npm[nid]))
+            except Exception as _np_e:
+                logger.warning("Restore snapshot: 程序性记忆清理失败: %s", _np_e, exc_info=True)
+        except Exception as e:
+            logger.error("Restore snapshot: 状态恢复失败: %s", e, exc_info=True)
+            return {"success": False, "error": f"状态恢复失败: {e}"}
+        logger.info("Restore snapshot: 已恢复 turn=%d 状态（玩家 %s, day %d）",
+                    target_turn, self.player_state.name, self.world_state.current_day)
+        return {"success": True, "turn": target_turn, "history_mgr": history_mgr}
+
+    def _pop_last_narrative(self) -> int:
+        """[v12.1] 从 narrative_history 末尾弹出一轮（narrative + 关联 event），返回移除条数（undo/retry 共用）"""
+        step_removed = 0
+        while self.narrative_history:
+            last = self.narrative_history[-1]
+            if last.get("type") == "narrative":
+                self.narrative_history.pop()
+                step_removed += 1
+                break
+            elif last.get("type") == "event":
+                self.narrative_history.pop()
+                step_removed += 1
+                continue
+            else:
+                break
+        # [2026-08-10] 历史被撤销/重试缩短后，章节检查点必须同步钳制，
+        # 否则下次生成章节时 checkpoint 大于历史长度，会误判“无新内容”。
+        if self.last_novel_checkpoint > len(self.narrative_history):
+            self.last_novel_checkpoint = len(self.narrative_history)
+        return step_removed
+
+    def _rollback_butterfly(self) -> None:
+        """[v12.1] 蝴蝶效应记录回退一轮（undo/retry 共用）"""
+        if self.butterfly and self.butterfly.player_actions_history:
+            self.butterfly.player_actions_history.pop()
+            if self.butterfly.pending_approvals:
+                self.butterfly.pending_approvals.pop()
 
     def undo_last_turn(self, steps: int = 1) -> dict:
         """[v11] 撤销最后一次玩家行动及AI回复，从后端状态中彻底移除。
@@ -1455,59 +1756,68 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         - steps=N：连续撤销 N 次玩家行动（含每次的 AI 回复和关联事件）
         - steps=0 或负数：不撤销
         撤销会在 narrative_history 为空时提前停止，不会报错。
+
+        [v12.1] 修复：原实现只删历史记录不恢复状态（钱/物品/NPC/时间均未回滚）。
+        现在先恢复 history.db 中 (current_turn - steps) 的状态快照，再删除历史记录，
+        并清理 history.db 中对应 turn 区间的快照与叙事记录，做到真撤销。
         """
         if steps <= 0:
             return {"success": True, "removed": 0, "remaining": len(self.narrative_history), "undone_turns": 0}
         if not self.narrative_history:
             return {"success": False, "error": "没有可撤销的历史记录"}
 
-        total_removed = 0
-        undone_turns = 0
+        # 数出实际可撤销的 narrative 轮数（尾部可能混有 event 条目）
+        narr_count = sum(1 for h in self.narrative_history if h.get("type") == "narrative")
+        if narr_count == 0:
+            return {"success": False, "error": "没有可撤销的历史记录"}
+        steps = min(steps, narr_count)
 
-        # 循环撤销 steps 步（每步 = 一个 narrative + 其前置关联 event）
-        for step in range(steps):
+        current_turn = self.meta.current_turn
+        target_turn = max(0, current_turn - steps)
+
+        # 1. 恢复目标 turn 的状态快照（target_turn=0 或快照缺失时退化为仅删记录）
+        restored = False
+        history_mgr = None
+        if target_turn >= 1:
+            restore = self._restore_snapshot_from_turn(target_turn)
+            restored = restore.get("success")
+            if restored:
+                history_mgr = restore["history_mgr"]
+                # 2. 清理 history.db 中 (target_turn, current_turn] 区间的快照与叙事记录
+                try:
+                    for t in range(target_turn + 1, current_turn + 1):
+                        history_mgr.delete_snapshot(self.current_world_id, t)
+                        history_mgr.delete_narrative_entries(self.current_world_id, t)
+                except Exception as e:
+                    logger.warning("Undo: 清理 history.db 失败: %s", e, exc_info=True)
+
+                # [v12.1] 记忆层整体回滚到 target_turn（chroma/briefs/摘要/事件日志/NPC记忆/清pending）
+                try:
+                    self._restore_memory_snapshot(target_turn)
+                except Exception as e:
+                    logger.warning("Undo: 记忆层回滚失败: %s", e, exc_info=True)
+            else:
+                logger.warning("Undo: 快照恢复失败，退化为仅删除记录: %s", restore.get("error"))
+
+        # 3. 弹出 narrative_history 最后 steps 轮（每轮 = narrative + 关联 event）
+        total_removed = 0
+        undone = 0
+        for _step in range(steps):
             if not self.narrative_history:
                 break  # 历史已空，提前停止
-
-            step_removed = 0
-            # 从 narrative_history 末尾移除：先移除可能的 event 条目，再移除 narrative 条目
-            # 注意：一次回合可能产生 1-2 条记录（narrative + 可选的 event）
-            while self.narrative_history:
-                last = self.narrative_history[-1]
-                # 移除最后一条 narrative（含 player_input）及其关联的 event
-                if last.get("type") == "narrative":
-                    self.narrative_history.pop()
-                    step_removed += 1
-                    break
-                elif last.get("type") == "event":
-                    # 检查是否为回合产生的世界事件（非自动事件）
-                    # 自动事件通常没有 player_input 关联
-                    self.narrative_history.pop()
-                    step_removed += 1
-                    # 继续循环，移除关联的 narrative 条目
-                    continue
-                else:
-                    break
-
+            step_removed = self._pop_last_narrative()
             if step_removed == 0:
                 break  # 本步没移除任何条目，说明历史结构异常，停止
-
             total_removed += step_removed
-            undone_turns += 1
+            undone += 1
+            self._rollback_butterfly()
 
-            # 撤销蝴蝶效应记录
-            if self.butterfly and self.butterfly.player_actions_history:
-                self.butterfly.player_actions_history.pop()
-                # 同步移除审批历史中对应回合的记录
-                if self.butterfly.pending_approvals:
-                    self.butterfly.pending_approvals.pop()
-
-            # 回合数回退
-            if self.meta and self.meta.current_turn > 0:
-                self.meta.current_turn -= 1
-
-        if total_removed == 0:
+        if total_removed == 0 and not restored:
             return {"success": False, "error": "没有可撤销的历史记录"}
+
+        # 4. turn 计数：快照恢复已设置 target_turn；未恢复（turn=0/无快照）时手动回退
+        if not restored and self.meta and self.meta.current_turn > 0:
+            self.meta.current_turn = max(0, self.meta.current_turn - undone)
 
         # 标记需要全量重写 JSONL，确保磁盘上的记录也被移除
         self._narrative_compressed = True
@@ -1518,13 +1828,67 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         # 导致撤销后存档始终抛 AttributeError 被吞掉，撤销结果无法持久化。改为 save_game()。
         try:
             self.save_game()
-            logger.info("Undo: removed %d entries (%d turns) from narrative_history, %d remaining",
-                        total_removed, undone_turns, len(self.narrative_history))
+            logger.info("Undo: removed %d entries (%d turns), restored to turn %d",
+                        total_removed, undone, self.meta.current_turn)
         except Exception as e:
             logger.error("Undo save failed: %s", e, exc_info=True)
             return {"success": False, "error": f"撤销后保存失败: {e}"}
 
-        return {"success": True, "removed": total_removed, "remaining": len(self.narrative_history), "undone_turns": undone_turns}
+        return {"success": True, "removed": total_removed, "remaining": len(self.narrative_history),
+                "undone_turns": undone, "restored_turn": self.meta.current_turn if restored else None}
+
+    def retry_last_turn(self, player_input: str) -> dict:
+        """[v12.1] 重试上一行动：回滚到该输入之前的状态快照，准备重新生成。
+
+        修复 bug：原"重新生成"复用 /api/input，后端每次都会完整推进一个回合
+        （turn+1、规则生效、写快照、自动存档），导致同一行动被世界重复执行，
+        history 累积多条、叙事越来越乱。
+
+        语义：恢复上一快照 → 回退 turn → 清掉上一轮历史/快照记录，
+        随后调用方照常调用 process_player_input() 重新生成。
+        - 不推进 turn（process 内部会 +1，这里先 -1 抵消）
+        - 不累积 history.db（删除旧 turn 记录，新快照覆盖写入）
+        - narrative_history 内存回退一轮，避免加载存档时看到重复生成
+        """
+        if not self.narrative_history:
+            return {"success": False, "error": "没有可重试的历史记录"}
+        if not self.player_state or not self.world_state:
+            return {"success": False, "error": "游戏状态未初始化"}
+
+        current_turn = self.meta.current_turn
+        prev_turn = current_turn - 1
+        if prev_turn < 0:
+            return {"success": False, "error": "没有可回滚的上一状态"}
+
+        # 1. 恢复上一快照（与 undo 共用公共方法）
+        restore = self._restore_snapshot_from_turn(prev_turn)
+        if not restore.get("success"):
+            return {"success": False, "error": restore.get("error", "重试失败，游戏状态未改变")}
+        history_mgr = restore["history_mgr"]
+
+        # [v12.1] 记忆层整体回滚到 prev_turn（chroma/briefs/摘要/事件日志/NPC记忆/清pending）
+        try:
+            self._restore_memory_snapshot(prev_turn)
+        except Exception as e:
+            logger.warning("Retry: 记忆层回滚失败: %s", e, exc_info=True)
+
+        # 2. 回滚内存 narrative_history 最后一轮（narrative + 关联 event）
+        self._pop_last_narrative()
+        self._narrative_compressed = True
+        self._persisted_narrative_count = len(self.narrative_history)
+
+        # 3. 删除 history.db 中旧 turn 的快照与叙事记录（新生成将覆盖写入）
+        try:
+            history_mgr.delete_snapshot(self.current_world_id, current_turn)
+            history_mgr.delete_narrative_entries(self.current_world_id, current_turn)
+        except Exception as e:
+            logger.warning("Retry: 清理旧历史记录失败: %s", e, exc_info=True)
+
+        # 4. 蝴蝶效应回退
+        self._rollback_butterfly()
+
+        logger.info("Retry: 已回滚到 turn %d，准备重新生成: %s", prev_turn, player_input[:30])
+        return {"success": True, "rollback_turn": prev_turn}
 
     def _classify_action_type(self, player_input: str, narrative: str) -> str:
         text = (player_input + " " + narrative).lower()
@@ -1842,18 +2206,51 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
         if not self.narrative or not self.player_state or not self.world_state:
             return {"chapter": "", "checkpoint": 0, "entries_count": 0}
 
-        recent = self.narrative_history[self.last_novel_checkpoint:]
+        # [2026-08-10] 撤销/重试后历史可能变短：检查点必须钳制到当前历史长度，
+        # 否则新剧情会被误判为“上次生成后没有新内容”，章节一直生成不出来。
+        checkpoint = min(self.last_novel_checkpoint, len(self.narrative_history))
+        recent = self.narrative_history[checkpoint:]
 
         if not recent:
-            return {"chapter": "", "checkpoint": self.last_novel_checkpoint,
+            return {"chapter": "", "checkpoint": checkpoint,
                     "entries_count": 0, "message": "上次生成小说后没有新的互动记录"}
 
-        full_log = "\n".join([
-            f"[{h.get('type', '')}] 第{h.get('day', '?')}天 {h.get('time', '')}: "
-            f"{'玩家: ' + h.get('player_input', '') + ' → ' if h.get('player_input') else ''}"
-            f"{h.get('text', '')}"
-            for h in recent
-        ])
+        # [2026-08-10] 分层记忆架构：头部 = 概况/纪要（早期脉络）+ 尾部 = 最近 7 轮完整原文
+        head_text = ""
+        try:
+            store = getattr(self, "_narrative_summaries", None)
+            if store is None or getattr(self, "_narrative_summaries_world", None) != self.current_world_id:
+                from .narrative_summaries import NarrativeSummaryStore
+                store = NarrativeSummaryStore(self.current_world_id, self.save_manager.base_dir)
+                self._narrative_summaries = store
+                self._narrative_summaries_world = self.current_world_id
+            if store:
+                # 头部预算 10 万中文字（≈15 万 token）
+                head_text = store.build_head_text(max_chars=100000)
+        except Exception as e:
+            logger.warning("章节概况头部构建失败: %s", e)
+
+        if head_text:
+            tail_entries = (recent or self.narrative_history)[-7:]
+            tail_text = "\n".join([
+                f"[{h.get('type', '')}] 第{h.get('day', '?')}天 {h.get('time', '')}: "
+                f"{'玩家: ' + h.get('player_input', '') + ' → ' if h.get('player_input') else ''}"
+                f"{h.get('text', '')}"
+                for h in tail_entries
+            ])
+            full_log = (
+                f"【早期剧情脉络（概况/纪要，旧→新）】\n{head_text}\n\n"
+                f"【最近7轮完整叙事】\n{tail_text}"
+            )
+        else:
+            # 概况尚未生成（新功能回填前）：回退原逻辑（checkpoint 后全部原文，
+            # 由 _compress_full_log 按 15 万预算处理——当前历史量级全文直接进入）
+            full_log = "\n".join([
+                f"[{h.get('type', '')}] 第{h.get('day', '?')}天 {h.get('time', '')}: "
+                f"{'玩家: ' + h.get('player_input', '') + ' → ' if h.get('player_input') else ''}"
+                f"{h.get('text', '')}"
+                for h in recent
+            ])
 
         age_info = f"当前年龄: {self.player_state.age}岁"
         economy_info = ""
@@ -1861,9 +2258,20 @@ class GameEngine(SaveMixin, WorldGenMixin, CharacterCardMixin, SubsystemQueryMix
             economy_info = self.economy_system.get_market_report(self.world_state.economy)
         butterfly_info = self.butterfly.get_world_memory() if self.butterfly else ""
 
+        # [2026-08-09] 注入世界观设定 + NPC 人物档案，解决章节与上文/设定脱节
+        world_intro = (self.world_def or {}).get("world_intro", "") if self.world_def else ""
+        npc_context = ""
+        if self.npc_states:
+            try:
+                from .prompt_utils import build_npc_context
+                npc_context = build_npc_context(self.npc_states, world_state=self.world_state)
+            except Exception as e:
+                logger.warning("build_npc_context failed: %s", e)
+
         chapter = self.narrative.generate_novel_chapter(
             self.player_state, self.world_state, full_log,
-            age_info, economy_info, butterfly_info
+            age_info, economy_info, butterfly_info,
+            world_intro=world_intro, npc_context=npc_context,
         )
 
         self.last_novel_checkpoint = len(self.narrative_history)

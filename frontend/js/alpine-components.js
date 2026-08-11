@@ -38,7 +38,7 @@ document.addEventListener('alpine:init', () => {
   Alpine.data('settingsPanel', () => ({
     config: {
       llm: { api_key: '', base_url: 'https://token-plan-cn.xiaomimimo.com/v1', model_name: 'mimo-V2.5-Pro' },
-      cheap_llm: { enabled: false, api_key: '', base_url: '', model_name: '' },
+      // [2026-08-10] 备用模型（cheap_llm）已移除
       dialogue_llm: { enabled: false, api_key: '', base_url: '', model_name: '' },
       image: { api_key: '', base_url: 'https://api.siliconflow.cn/v1/images/generations', model_name: 'Kwai-Kolors/Kolors' },
       // [v10.5] 文本向量嵌入模型配置
@@ -64,7 +64,6 @@ document.addEventListener('alpine:init', () => {
         const res = await api('GET', '/api/config/raw')
         this.config = { ...this.config, ...res }
         if (res.llm) this.config.llm = { ...this.config.llm, ...res.llm }
-        if (res.cheap_llm) this.config.cheap_llm = { ...this.config.cheap_llm, ...res.cheap_llm }
         if (res.dialogue_llm) this.config.dialogue_llm = { ...this.config.dialogue_llm, ...res.dialogue_llm }
         if (res.image) this.config.image = { ...this.config.image, ...res.image }
         if (res.embedding) this.config.embedding = { ...this.config.embedding, ...res.embedding }
@@ -74,9 +73,10 @@ document.addEventListener('alpine:init', () => {
         this.llmProfiles = res.profiles?.llm || []
         this.imageProfiles = res.profiles?.image || []
         this.updateStyleDescription()
-        this.customStyleVisible = this.config.game?.narrative_style === '自定义'
+        // [v1.5] 自定义风格槽位：自定义/自定义1/2/3 均显示编辑区
+        this.customStyleVisible = /^自定义/.test(String(this.config.game?.narrative_style || ''))
         this.$watch('config.game.narrative_style', (val) => {
-          this.customStyleVisible = val === '自定义'
+          this.customStyleVisible = /^自定义/.test(String(val || ''))
           this.updateStyleDescription()
         })
       } catch (e) {
@@ -94,6 +94,11 @@ document.addEventListener('alpine:init', () => {
         '诗化散文': '意境优先的散文风格，类似《额尔古纳右岸》或迟子建的作品。注重景物描写和氛围营造，语言优美，富有诗意。节奏缓慢，适合沉浸式体验。',
         '真人作者': '不要堆砌华丽辞藻，叙事以「说清楚事」为第一要务。对话占比高、信息密度大、承担推进剧情/传递世界观/塑造人物三重功能。大量内心独白展开思维过程。第三人称全知视角，多视角自由切换制造信息差。配角有目标与动机，非工具人。长句为主，多重从句嵌套。幽默为结构性节奏工具。'
       }
+      // [v1.5] 3 个自定义槽位：从 DOM 读取当前编辑内容（未填显示占位）
+      for (var si = 1; si <= 3; si++) {
+        var ta = document.getElementById('st_custom_style_' + si)
+        styles['自定义' + si] = ta && ta.value.trim() ? ta.value : ('自定义风格' + si + '（未填写）')
+      }
       this.styleDescription = styles[this.config.game?.narrative_style] || ''
     },
 
@@ -107,7 +112,19 @@ document.addEventListener('alpine:init', () => {
       Alpine.store('app').loading = true
       try {
         const styleName = this.config.game?.narrative_style
-        const customText = styleName === '自定义' ? (this.$refs.customStyle?.value || '') : ''
+        // [v1.5] 3 个自定义槽位：写入 narrative_styles 字典
+        const CUSTOM_SLOTS = ['自定义1', '自定义2', '自定义3']
+        for (let si = 0; si < CUSTOM_SLOTS.length; si++) {
+          const slotText = (document.getElementById('st_custom_style_' + (si + 1))?.value || '').trim()
+          if (slotText) {
+            await api('POST', '/api/narrative-style/custom', { name: CUSTOM_SLOTS[si], description: slotText })
+          } else {
+            try { await api('DELETE', '/api/narrative-style/custom/' + encodeURIComponent(CUSTOM_SLOTS[si])) } catch (e) {}
+          }
+        }
+        // [v1.5] 选中自定义N 时 custom_text 传对应槽位内容；[Bugfix] 正则捕获组取槽位号（slice(2) 中文截断错误）
+        const _sm = /^自定义([123])$/.exec(String(styleName))
+        const customText = _sm ? (document.getElementById('st_custom_style_' + _sm[1])?.value || '') : ''
         const narrativePerspective = this.config.game?.narrative_perspective || 'second'
         await api('POST', '/api/narrative-style', { style_name: styleName, custom_text: customText, narrative_perspective: narrativePerspective })
 

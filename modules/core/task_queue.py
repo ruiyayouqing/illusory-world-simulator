@@ -50,6 +50,18 @@ class BackgroundTaskQueue:
             self._worker_task.cancel()
             logger.info("Background task queue stopped")
 
+    def clear(self) -> int:
+        """[v12.1] 清空 pending 任务（撤销/重试时丢弃被撤销回合的后处理写入）。
+
+        注意：正在执行的 worker 任务无法中断，但会尽快完成；
+        调用方应在清空后立即回滚对应数据层，覆盖竞态窗口。
+        """
+        n = len(self._queue)
+        self._queue.clear()
+        if n:
+            logger.info("Background task queue cleared: %d pending tasks dropped", n)
+        return n
+
     def post(self, func: Callable[..., Any], *args, **kwargs):
         """投递一个同步或异步任务到后台"""
         is_async = asyncio.iscoroutinefunction(func)

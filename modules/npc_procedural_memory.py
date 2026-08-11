@@ -38,6 +38,7 @@ class ProceduralEntry:
     success_count: int = 0    # 成功次数
     failure_count: int = 0    # 失败次数
     recency_weight: float = 1.0  # 时间衰减权重（检索时综合使用，不修改原始 effectiveness）
+    turn: int = -1            # [v12.7] 产生的 turn（回滚时按 turn 删除）
 
     def to_dict(self) -> dict:
         return {
@@ -52,6 +53,7 @@ class ProceduralEntry:
             "success_count": self.success_count,
             "failure_count": self.failure_count,
             "recency_weight": round(self.recency_weight, 3),
+            "turn": self.turn,
         }
 
     @classmethod
@@ -84,7 +86,7 @@ class NPCProceduralMemory:
     def record_action(self, npc: "NPCState", action_type: str,
                       context: str, outcome: str,
                       effectiveness: float, energy_cost: int,
-                      day: int, location: str = ""):
+                      day: int, location: str = "", turn: int = -1):
         """
         记录一次 NPC 动作经验。
 
@@ -97,6 +99,7 @@ class NPCProceduralMemory:
             energy_cost: 精力消耗
             day: 天数
             location: 地点
+            turn: [v12.7] 产生的 turn（回滚时按 turn 删除）
         """
         npc_id = npc.agent_id
         if npc_id not in self._memories:
@@ -110,6 +113,7 @@ class NPCProceduralMemory:
             energy_cost=energy_cost,
             day=day,
             location=location or npc.current_location or "",
+            turn=turn,
         )
 
         # 检查是否有高度相似的记忆，合并而非新增

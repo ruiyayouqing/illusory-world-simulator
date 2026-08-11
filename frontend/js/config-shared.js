@@ -7,10 +7,7 @@ var CONFIG_SECTIONS = {
     fields: ['api_key', 'base_url', 'model_name', 'max_tokens'],
     defaults: { api_key: '', base_url: 'https://token-plan-cn.xiaomimimo.com/v1', model_name: 'mimo-V2.5-Pro', max_tokens: 8192 }
   },
-  cheap_llm: {
-    fields: ['enabled', 'api_key', 'base_url', 'model_name'],
-    defaults: { enabled: false, api_key: '', base_url: '', model_name: '' }
-  },
+  // [2026-08-10] 备用模型（cheap_llm）已移除
   dialogue_llm: {
     fields: ['enabled', 'api_key', 'base_url', 'model_name'],
     defaults: { enabled: false, api_key: '', base_url: '', model_name: '' }
@@ -33,7 +30,7 @@ var CONFIG_SECTIONS = {
   },
   game: {
     fields: ['narrative_style', 'narrative_style_custom', 'narrative_perspective', 'economy_enabled', 'narrative_max_chars', 'action_validation_enabled'],
-    defaults: { narrative_style: '真人作者', narrative_style_custom: '', narrative_perspective: 'third', economy_enabled: false, narrative_max_chars: 1000, action_validation_enabled: true }
+    defaults: { narrative_style: '真人作者', narrative_style_custom: '', narrative_perspective: 'third', economy_enabled: false, narrative_max_chars: 2000, action_validation_enabled: true }
   }
 };
 
@@ -56,10 +53,7 @@ function buildFullSettingsBody(config) {
     llm_base_url: config.llm.base_url,
     llm_model: config.llm.model_name,
     llm_max_tokens: config.llm.max_tokens || 0,
-    cheap_llm_enabled: config.cheap_llm.enabled,
-    cheap_llm_api_key: config.cheap_llm.enabled ? config.cheap_llm.api_key : '',
-    cheap_llm_base_url: config.cheap_llm.enabled ? config.cheap_llm.base_url : '',
-    cheap_llm_model: config.cheap_llm.enabled ? config.cheap_llm.model_name : '',
+    // [2026-08-10] 备用模型（cheap_llm）已移除：不再提交 cheap_llm_* 字段
     dialogue_llm_enabled: config.dialogue_llm.enabled,
     dialogue_llm_api_key: config.dialogue_llm.enabled ? config.dialogue_llm.api_key : '',
     dialogue_llm_base_url: config.dialogue_llm.enabled ? config.dialogue_llm.base_url : '',
@@ -77,7 +71,7 @@ function buildFullSettingsBody(config) {
     strip_gray_narrative: config.ui.strip_gray_narrative,
     npc_info_visibility: config.npc_info_visibility,
     economy_enabled: config.game.economy_enabled,
-    narrative_max_chars: parseInt(config.game.narrative_max_chars) || 1000,
+    narrative_max_chars: parseInt(config.game.narrative_max_chars) || 2000,
     // [v1.3] NPC 私密档案开关（普通模式）
     npc_private_facts_enabled: !!(config.features && config.features.npc_private_facts && config.features.npc_private_facts.enabled),
     // [v1.3] 小说模式叙事视角
@@ -98,17 +92,12 @@ function collectConfigFromDOM() {
       model_name: $('st_lm').value,
       max_tokens: maxTokens
     },
-    cheap_llm: {
-      enabled: $('st_cheap_enabled').checked,
-      api_key: $('st_cheap_lk').value,
-      base_url: $('st_cheap_lb').value,
-      model_name: $('st_cheap_lm').value
-    },
+    // [2026-08-10] 备用模型（cheap_llm）已移除：不再收集，统一走主模型
     dialogue_llm: {
-      enabled: $('st_dlg_enabled').checked,
-      api_key: $('st_dlg_lk').value,
-      base_url: $('st_dlg_lb').value,
-      model_name: $('st_dlg_lm').value
+      enabled: $('st_dlg_enabled') ? $('st_dlg_enabled').checked : false,
+      api_key: $('st_dlg_lk') ? $('st_dlg_lk').value : '',
+      base_url: $('st_dlg_lb') ? $('st_dlg_lb').value : '',
+      model_name: $('st_dlg_lm') ? $('st_dlg_lm').value : ''
     },
     image: {
       api_key: $('st_ik').value,
@@ -132,9 +121,16 @@ function collectConfigFromDOM() {
     npc_info_visibility: $('st_npc_visibility').value,
     game: {
       narrative_style: $('st_narrative_style') ? $('st_narrative_style').value : '真人作者',
-      narrative_style_custom: $('st_custom_style') ? $('st_custom_style').value : '',
+      narrative_style_custom: (function() {
+        // [v1.5] 选中自定义N 时，把对应槽位内容同步到 narrative_style_custom
+        var s = $('st_narrative_style');
+        var sn = s ? s.value : '';
+        var m = /^自定义([123])$/.exec(sn);
+        if (m) { var ta = $('st_custom_style_' + m[1]); return ta ? ta.value : ''; }
+        return '';
+      })(),
       economy_enabled: $('st_economy_enabled').checked,
-      narrative_max_chars: parseInt($('st_narrative_max_chars').value) || 1000,
+      narrative_max_chars: parseInt($('st_narrative_max_chars').value) || 2000,
       action_validation_enabled: $('st_action_validation') ? $('st_action_validation').checked : false
     },
     novel_roleplay: {
@@ -168,16 +164,14 @@ function fillDOMFromConfig(c) {
     inp.disabled = false;
     inp.value = mt;
   }
-  var cheap = c.cheap_llm || {};
-  $('st_cheap_enabled').checked = cheap.enabled === true;
-  $('st_cheap_lk').value = cheap.api_key || '';
-  $('st_cheap_lb').value = cheap.base_url || '';
-  $('st_cheap_lm').value = cheap.model_name || '';
+  // [2026-08-10] 备用模型（cheap_llm）已移除：不再回填 DOM
   var dlg = c.dialogue_llm || {};
-  $('st_dlg_enabled').checked = dlg.enabled === true;
-  $('st_dlg_lk').value = dlg.api_key || '';
-  $('st_dlg_lb').value = dlg.base_url || '';
-  $('st_dlg_lm').value = dlg.model_name || '';
+  // [Bugfix 2026-08-09] 对话模型 section 已被 v11 注释屏蔽（HTML 注释内），
+  // 元素不存在时跳过，否则 null.checked 抛异常导致 loadSettings 整体中断
+  if ($('st_dlg_enabled')) $('st_dlg_enabled').checked = dlg.enabled === true;
+  if ($('st_dlg_lk')) $('st_dlg_lk').value = dlg.api_key || '';
+  if ($('st_dlg_lb')) $('st_dlg_lb').value = dlg.base_url || '';
+  if ($('st_dlg_lm')) $('st_dlg_lm').value = dlg.model_name || '';
   $('st_ik').value = c.image?.api_key || '';
   $('st_iu').value = c.image?.base_url || '';
   $('st_im').value = c.image?.model_name || '';
@@ -192,7 +186,7 @@ function fillDOMFromConfig(c) {
   $('st_fp').value = fp.content || '';
   $('st_fpe').checked = fp.enabled !== false;
   $('st_economy_enabled').checked = c.game?.economy_enabled === true;
-  $('st_narrative_max_chars').value = c.game?.narrative_max_chars || 1000;
+  $('st_narrative_max_chars').value = c.game?.narrative_max_chars || 2000;
   if ($('st_action_validation')) $('st_action_validation').checked = c.game?.action_validation_enabled !== false;
   // [v1.3] NPC 私密档案开关（普通模式）
   if ($('st_npc_private_facts')) {

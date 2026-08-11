@@ -53,17 +53,38 @@ class NarrativeEngine:
                 return loc_obj.name or loc_code
         return loc_code
 
-    def _compress_full_log(self, full_log: str, max_tokens: int = 3000) -> str:
+    def _compress_full_log(self, full_log: str, max_tokens: int = 50000) -> str:
         """
-        [v10++] 压缩当日事件日志，避免过长日志挤占叙事 token 预算。
-        优先使用 ContextEngine 的轻量压缩（保留首尾）；不可用时原样返回。
-        注意：不压缩到过小，保留足够事件细节以维持叙事质量。
+        [2026-08-09] 章节上文压缩：尾部完整保留 + 头部 LLM 摘要（前情提要）。
+
+        背景：原实现用 ContextEngine 硬截断（保留首尾、丢弃中段），
+        导致章节生成看不到中间的关键剧情（如重要事件/伏笔），与上文脱节。
+        现方案：预算内直接使用；超预算时——
+          - 尾部（约 70% 预算）保留完整原文（最近细节不丢）
+          - 头部（更早的剧情）用一次 LLM 调用压成 600 字左右"前情提要"（脉络不丢）
+        摘要失败时回退到原有硬截断逻辑，保证不阻塞。
         """
         if not full_log:
             return ""
         current = estimate_tokens(full_log)
         if current <= max_tokens:
             return full_log
+        # 尾部保留预算（token），头部交给摘要
+        tail_tokens = int(max_tokens * 0.7)
+        tail_chars = max(200, int(tail_tokens / 1.5))  # 1 中文字 ≈ 1.5 token
+        head_text = full_log[:-tail_chars]
+        tail_text = full_log[-tail_chars:]
+        try:
+            summary = self._summarize_log(head_text)
+            if summary:
+                logger.info(
+                    "full_log 摘要压缩: %d -> 前情提要(%d字) + 尾部完整(%d字)",
+                    current, len(summary), len(tail_text),
+                )
+                return f"【前情提要（早期剧情摘要，已压缩）】\n{summary}\n\n【近期完整记录】\n{tail_text}"
+        except Exception as e:
+            logger.warning("full_log 摘要失败，回退硬截断: %s", e)
+        # 回退：ContextEngine 硬截断（保留首尾）
         if self.context_engine:
             try:
                 compressed = self.context_engine.compress_text(full_log, max_tokens)
@@ -75,6 +96,28 @@ class NarrativeEngine:
             except Exception as e:
                 logger.warning("ContextEngine compress failed, keep original: %s", e)
         return full_log
+
+    def _summarize_log(self, text: str) -> str:
+        """把早期剧情压缩成前情提要（剧情纲要），供章节创作参考。"""
+        if not text:
+            return ""
+        # 摘要输入限制在 4 万字内（约 6 万 token），避免极端超长输入
+        clip = text[-40000:]
+        prompt = (
+            "请将以下游戏剧情记录压缩成一份【前情提要】（剧情纲要），供后续小说章节创作参考。\n"
+            "\n"
+            "【要求】\n"
+            "1. 1800-2200字，按时间线概括关键事件、人物关系变化、重要伏笔\n"
+            "2. 保留具体人名、地名、事件因果链\n"
+            "3. 主要支线和配角也要提及，不能只写主线\n"
+            "4. 只陈述事实脉络，不要文学化描写、不要抒情\n"
+            "5. 结尾用一句话点明当前剧情进行到何处\n"
+            "\n"
+            f"【早期剧情记录】\n{clip}\n"
+            "\n"
+            "直接输出前情提要："
+        )
+        return self.llm.chat(prompt, temperature=0.3, max_tokens=3000)
 
     def generate_daily_chapter(self, event_log: str, player: PlayerState,
                                world_state: WorldState, day: int,
@@ -192,8 +235,9 @@ class NarrativeEngine:
                                full_log: str, age_info: str = "",
                                economy_info: str = "", butterfly_info: str = "",
                                world_style: str = "",
+                               world_intro: str = "", npc_context: str = "",
                                max_tokens: int = 1500,
-                               log_budget: int = 3000,
+                               log_budget: int = 150000,
                                days_span: int = 1) -> str:
         relations_text = ", ".join([
             f"{k}(好感{v.favor})" for k, v in player.relations.items()
@@ -215,6 +259,8 @@ class NarrativeEngine:
             prompt_template = AUTORUN_NOVEL_CHAPTER_PROMPT
             prompt = prompt_template.format(
                 style_instruction=self._get_style_instruction(world_style),
+                world_intro=world_intro or "（无）",
+                npc_context=npc_context or "（无）",
                 full_log=full_log,
                 player_name=player.name,
                 player_age=player.age,
@@ -242,6 +288,8 @@ class NarrativeEngine:
         else:
             prompt = DAILY_NOVEL_CHAPTER_PROMPT.format(
                 style_instruction=self._get_style_instruction(world_style),
+                world_intro=world_intro or "（无）",
+                npc_context=npc_context or "（无）",
                 full_log=full_log,
                 player_name=player.name,
                 player_age=player.age,

@@ -220,9 +220,18 @@ class CharacterStateManager:
             state.record_change(turn, day, trigger, "emotional_state", old, state.emotional_state)
 
         if "stress_level" in changes:
-            old = str(state.stress_level)
-            state.stress_level = max(0, min(100, int(changes["stress_level"])))
-            state.record_change(turn, day, trigger, "stress_level", old, str(state.stress_level))
+            # [2026-08-10] 容错：LLM 可能返回 "从60降至40" / "下降了" / "50左右"
+            # 等描述性文本而非纯数字，直接 int() 会抛异常导致整轮状态更新丢失。
+            parsed = self._parse_stress_level(changes["stress_level"])
+            if parsed is not None:
+                old = str(state.stress_level)
+                state.stress_level = parsed
+                state.record_change(turn, day, trigger, "stress_level", old, str(state.stress_level))
+            else:
+                logger.warning(
+                    "stress_level 解析失败，跳过该项（不连累其他字段）: %r",
+                    changes["stress_level"],
+                )
 
         for fact in changes.get("new_facts", []):
             if fact and fact not in state.known_facts:
@@ -266,6 +275,42 @@ class CharacterStateManager:
                 state.recent_behaviors.append(behavior)
                 if len(state.recent_behaviors) > 20:
                     state.recent_behaviors = state.recent_behaviors[-20:]
+
+    @staticmethod
+    def _parse_stress_level(value: Any) -> int | None:
+        """[2026-08-10] 容错解析 stress_level。
+
+        LLM 可能返回多种形态：
+          - 纯数字: 60 / "60" / 60.0
+          - 描述性文本: "从60降至40" / "下降了" / "50左右" / "压力较大"
+        策略：优先取完整数字；否则从文本中提取第一个数字（描述场景取末值
+        更贴近"当前状态"，但"降至X"取 X 更合理 → 取最后一个数字）；
+        都失败返回 None（调用方跳过该项，不连累其他字段）。
+        """
+        import re
+
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return max(0, min(100, int(value)))
+        s = str(value).strip()
+        if not s:
+            return None
+        # 尝试整体数字（含小数/负数/百分号）
+        try:
+            return max(0, min(100, int(float(s.replace("%", "").strip()))))
+        except (ValueError, TypeError):
+            pass
+        # 提取文本中的最后一个数字（"从60降至40" → 40，即当前状态）
+        nums = re.findall(r"-?\d+(?:\.\d+)?", s)
+        if nums:
+            try:
+                return max(0, min(100, int(float(nums[-1]))))
+            except (ValueError, TypeError):
+                return None
+        return None
 
     def get_state_for_prompt(self, entity_id: str) -> str:
         """获取角色的动态状态描述，用于注入 prompt。"""

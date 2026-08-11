@@ -452,6 +452,7 @@ async function confirmAiSpawn() {
   }
 
   var resultEl = $('ai_spawn_result');
+  var aiCmdEl = $('ai_cmd_result');  // [2026-08-09] 给AI下命令弹窗的结果容器（可选）
   var btn = $('btn_ai_spawn');
   if (btn) {
     btn.disabled = true;
@@ -462,6 +463,10 @@ async function confirmAiSpawn() {
   if (resultEl) {
     resultEl.style.color = 'var(--dim)';
     resultEl.textContent = '⏳ 正在将 ' + selected.length + ' 个角色加入世界...';
+  }
+  if (aiCmdEl) {
+    aiCmdEl.style.color = 'var(--dim)';
+    aiCmdEl.textContent = '⏳ 正在将 ' + selected.length + ' 个角色加入世界...';
   }
 
   try {
@@ -487,6 +492,12 @@ async function confirmAiSpawn() {
         resultEl.style.color = 'var(--text)';
         resultEl.innerHTML = html;
       }
+      if (aiCmdEl) {
+        aiCmdEl.style.color = 'var(--text)';
+        aiCmdEl.innerHTML = html;
+        var aiCmdStatusEl = $('ai_cmd_status');
+        if (aiCmdStatusEl) aiCmdStatusEl.textContent = '';
+      }
       toast('已加入 ' + spawned.length + ' 个角色到世界', 'success');
       _aiSpawnDesigns = [];
       updateStatus();
@@ -504,6 +515,64 @@ async function confirmAiSpawn() {
       btn.style.pointerEvents = '';
       btn.textContent = '🤖 让 AI 生成角色';
     }
+  }
+}
+
+// ===== [2026-08-09] 🤖 给AI下命令（游戏右侧快捷入口，复用 ai-spawn 预览-确认流程）=====
+function openAiCommand() {
+  var m = $('aiCommandModal');
+  if (m) m.classList.add('on');
+}
+
+function closeAiCommand() {
+  var m = $('aiCommandModal');
+  if (m) m.classList.remove('on');
+}
+
+async function sendAiCommand() {
+  var input = $('ai_cmd_input');
+  var statusEl = $('ai_cmd_status');
+  var resultEl = $('ai_cmd_result');
+  var cmd = input ? input.value.trim() : '';
+  if (!cmd) {
+    toast('请先输入指令', 'info');
+    return;
+  }
+  if (_aiSpawning) return;
+  _aiSpawning = true;
+  if (statusEl) statusEl.textContent = '⏳ AI 正在执行指令，请稍候（30-60秒）...';
+  if (resultEl) {
+    resultEl.style.display = 'block';
+    resultEl.style.color = 'var(--dim)';
+    resultEl.textContent = '⏳ AI 正在读取世界设定并执行指令...';
+  }
+  try {
+    var d = await api('POST', '/api/npc/ai-spawn-preview', {
+      count: 1,
+      focus: 'custom',
+      requirement: cmd,
+    });
+    if (d && d.error) {
+      if (resultEl) { resultEl.style.color = 'var(--accent)'; resultEl.textContent = '❌ ' + d.error; }
+      toast('指令执行失败: ' + d.error, 'error');
+    } else if (d && d.status === 'ok') {
+      var designs = d.designs || [];
+      if (designs.length === 0) {
+        if (resultEl) { resultEl.style.color = 'var(--dim)'; resultEl.textContent = d.message || 'AI 未返回可执行结果，请换个指令试试'; }
+        toast('AI 未生成结果，请调整指令', 'info');
+      } else {
+        _aiSpawnDesigns = designs;
+        renderAiSpawnPreview(designs, resultEl);
+        if (statusEl) statusEl.textContent = '';
+      }
+    } else {
+      if (resultEl) { resultEl.style.color = 'var(--accent)'; resultEl.textContent = '❌ 未知响应，请重试'; }
+    }
+  } catch(e) {
+    if (resultEl) { resultEl.style.color = 'var(--accent)'; resultEl.textContent = '❌ 请求失败: ' + (e.message || e); }
+    toast('指令请求失败: ' + (e.message || e), 'error');
+  } finally {
+    _aiSpawning = false;
   }
 }
 
@@ -528,6 +597,12 @@ async function loadNpcListForEdit() {
     var d = await api('GET', '/api/npcs');
     var npcs = d.npcs || [];
     sel.innerHTML = '<option value="">-- 请选择角色 --</option>';
+    // [功能一] 主角选项置顶，value 固定为 __player__
+    var playerOpt = document.createElement('option');
+    playerOpt.value = '__player__';
+    var playerName = (GS && GS.player && GS.player.name) ? GS.player.name : '主角';
+    playerOpt.textContent = '★ ' + playerName + '（主角）';
+    sel.appendChild(playerOpt);
     npcs.forEach(function(npc) {
       var opt = document.createElement('option');
       opt.value = npc.agent_id || npc.id || '';
@@ -539,6 +614,14 @@ async function loadNpcListForEdit() {
   }
 }
 
+// [功能一] 切换"主角/配角"表单字段的显隐
+function setEditFormMode(isPlayer) {
+  var npcOnlyEls = document.querySelectorAll('#editNpcForm .npc-only');
+  for (var i = 0; i < npcOnlyEls.length; i++) {
+    npcOnlyEls[i].style.display = isPlayer ? 'none' : '';
+  }
+}
+
 async function loadNpcForEdit() {
   var npcId = $('edit_npc_select').value;
   if (!npcId) {
@@ -546,6 +629,23 @@ async function loadNpcForEdit() {
     return;
   }
   _editNpcId = npcId;
+
+  // [功能一] 主角分支：加载精简表单
+  if (npcId === '__player__') {
+    try {
+      var pd = await api('GET', '/api/player/profile');
+      if (pd.error) { alert(pd.error); return; }
+      var p = pd.player || {};
+      $('edit_npc_name').value = p.name || '';
+      $('edit_npc_age').value = p.age || 18;
+      setEditFormMode(true);
+      $('editNpcForm').style.display = 'block';
+    } catch(e) {
+      alert('加载主角信息失败: ' + e.message);
+    }
+    return;
+  }
+
   try {
     var d = await api('GET', '/api/npc/' + npcId);
     if (d.error) { alert(d.error); return; }
@@ -578,6 +678,9 @@ async function loadNpcForEdit() {
     $('edit_ai_goal').value = ai.current_goal || '';
     $('edit_ai_long_goal').value = ai.long_term_goal || '';
     $('edit_ai_style').value = ai.decision_style || 'normal';
+    // [功能二] 根据 hidden 状态切换按钮文案
+    updateHideButton(npc.hidden || false);
+    setEditFormMode(false);
     $('editNpcForm').style.display = 'block';
   } catch(e) {
     alert('加载角色信息失败: ' + e.message);
@@ -586,6 +689,26 @@ async function loadNpcForEdit() {
 
 async function doEditNpc() {
   if (!_editNpcId) { alert('请先选择角色'); return; }
+
+  // [功能一] 主角分支：调用 /api/player/profile
+  if (_editNpcId === '__player__') {
+    var playerName = $('edit_npc_name').value.trim();
+    if (!playerName) { alert('请输入主角名字'); return; }
+    try {
+      var pd = await api('PUT', '/api/player/profile', {
+        name: playerName,
+        age: parseInt($('edit_npc_age').value) || 18,
+      });
+      if (pd.error) { alert(pd.error); return; }
+      toast('已修改主角: ' + playerName, 'success');
+      closeEditNpc();
+      updateStatus();
+    } catch(e) {
+      alert('修改主角失败: ' + e.message);
+    }
+    return;
+  }
+
   var tagsStr = $('edit_npc_tags').value.trim();
   var tags = tagsStr ? tagsStr.split(',').map(function(t) { return t.trim(); }).filter(function(t) { return t; }) : [];
   var body = {
@@ -622,6 +745,37 @@ async function doEditNpc() {
     updateStatus();
   } catch(e) {
     alert('修改失败: ' + e.message);
+  }
+}
+
+// ===== [功能二] 隐藏/恢复 NPC =====
+function updateHideButton(isHidden) {
+  var btn = $('btn_toggle_hide_npc');
+  if (!btn) return;
+  if (isHidden) {
+    btn.textContent = '👁️ 恢复角色';
+    btn.setAttribute('data-hidden', '1');
+  } else {
+    btn.textContent = '🙈 隐藏角色';
+    btn.setAttribute('data-hidden', '0');
+  }
+}
+
+async function toggleHideNpc() {
+  if (!_editNpcId || _editNpcId === '__player__') {
+    toast('主角不支持隐藏', 'info');
+    return;
+  }
+  var btn = $('btn_toggle_hide_npc');
+  var willHide = btn.getAttribute('data-hidden') !== '1';
+  try {
+    var d = await api('POST', '/api/npc/' + _editNpcId + '/toggle-hide', { hidden: willHide });
+    if (d.error) { alert(d.error); return; }
+    updateHideButton(d.hidden);
+    toast(d.hidden ? '已隐藏角色' : '已恢复角色', 'success');
+    updateStatus();
+  } catch(e) {
+    alert('操作失败: ' + e.message);
   }
 }
 

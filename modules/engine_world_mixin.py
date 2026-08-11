@@ -68,9 +68,15 @@ class WorldGenMixin:
 
         npc_data_list = []
         for npc_id, npc_info in world_data.get("npcs", {}).items():
+            # LLM 偶发输出不规范：NPC 条目可能不是 dict（如被写成字符串/截断），防御处理
+            if not isinstance(npc_info, dict):
+                logger.warning("NPC [%s] 格式异常(%s)，已跳过该条", npc_id, type(npc_info).__name__)
+                continue
             raw_rel = npc_info.get("relation_to_player", {})
             if isinstance(raw_rel, str):
                 raw_rel = {"favor": 50, "relation_type": raw_rel}
+            elif not isinstance(raw_rel, dict):
+                raw_rel = {"favor": 50, "relation_type": "陌生人"}
             npc_data_list.append({
                 "agent_id": npc_id,
                 "name": npc_info.get("name", npc_id),

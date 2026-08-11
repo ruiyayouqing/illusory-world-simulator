@@ -2,6 +2,50 @@
 
 const API_BASE = '';
 
+// [公网访问] 页面内令牌输入框（兼容 iOS Safari — 其不支持 window.prompt）
+function showTokenModal() {
+  return new Promise(function(resolve) {
+    var ov = document.getElementById('txhjTokenOverlay');
+    if (ov) { ov.style.display = 'flex'; return; }
+    ov = document.createElement('div');
+    ov.id = 'txhjTokenOverlay';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)';
+    var box = document.createElement('div');
+    box.style.cssText = 'background:#1e2233;border:1px solid #445;border-radius:12px;padding:24px;width:84%;max-width:360px;color:#eee;font-family:system-ui,sans-serif;text-align:center';
+    var t = document.createElement('div');
+    t.textContent = '请输入访问令牌';
+    t.style.cssText = 'font-size:17px;font-weight:bold;margin-bottom:8px';
+    var d = document.createElement('div');
+    d.textContent = '服务器部署时已设置，输入一次后自动保存';
+    d.style.cssText = 'font-size:13px;color:#999;margin-bottom:16px';
+    var inp = document.createElement('input');
+    inp.type = 'password';
+    inp.placeholder = 'Access Token';
+    inp.style.cssText = 'width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid #556;background:#14161f;color:#fff;font-size:15px;margin-bottom:16px';
+    var btnRow = document.createElement('div');
+    btnRow.style.cssText = 'display:flex;gap:10px;justify-content:center';
+    var ok = document.createElement('button');
+    ok.textContent = '确定';
+    ok.style.cssText = 'flex:1;padding:10px;border:none;border-radius:8px;background:#4a6cf7;color:#fff;font-size:15px;cursor:pointer';
+    var cancel = document.createElement('button');
+    cancel.textContent = '取消';
+    cancel.style.cssText = 'flex:1;padding:10px;border:none;border-radius:8px;background:#333a4d;color:#aaa;font-size:15px;cursor:pointer';
+    function done(val) {
+      ov.style.display = 'none';
+      if (ov.parentNode) ov.parentNode.removeChild(ov);
+      resolve(val);
+    }
+    ok.onclick = function() { done(inp.value.trim()); };
+    cancel.onclick = function() { done(''); };
+    inp.addEventListener('keydown', function(e) { if (e.key === 'Enter') done(inp.value.trim()); });
+    btnRow.appendChild(ok); btnRow.appendChild(cancel);
+    box.appendChild(t); box.appendChild(d); box.appendChild(inp); box.appendChild(btnRow);
+    ov.appendChild(box);
+    document.body.appendChild(ov);
+    setTimeout(function(){ inp.focus(); }, 50);
+  });
+}
+
 // [v12] 确保 Token 已准备好再继续
 async function ensureToken() {
   if (window.ACCESS_TOKEN) return;
@@ -11,10 +55,23 @@ async function ensureToken() {
       var d = await resp.json();
       if (d.access_token) {
         window.ACCESS_TOKEN = d.access_token;
+        return;
       }
     }
   } catch(e) {
     console.warn('Failed to get access token', e);
+  }
+  // [公网访问] 本地接口不可达（远程访问）时：从 localStorage 读取，或让用户输入一次
+  var saved = null;
+  try { saved = localStorage.getItem('txhj_access_token'); } catch(e) {}
+  if (saved) {
+    window.ACCESS_TOKEN = saved;
+    return;
+  }
+  var input = await showTokenModal();
+  if (input) {
+    window.ACCESS_TOKEN = input;
+    try { localStorage.setItem('txhj_access_token', window.ACCESS_TOKEN); } catch(e) {}
   }
 }
 
@@ -57,6 +114,12 @@ async function api(method, path, body, timeout = 300000) {
     const resp = await fetch(API_BASE + path, opts);
     clearTimeout(timeoutId);
     if (!resp.ok) {
+      // [公网访问] 401 = 令牌失效/被重置，清除本地保存并提示重新输入
+      if (resp.status === 401) {
+        try { localStorage.removeItem('txhj_access_token'); } catch(e) {}
+        window.ACCESS_TOKEN = '';
+        return { error: '访问令牌无效或已过期，请刷新页面重新输入' };
+      }
       var text = await resp.text().catch(function() { return ''; });
       var detail = text.substring(0, 200);
       return { error: '服务器错误 (' + resp.status + ')' + (detail ? ': ' + detail : '') };

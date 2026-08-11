@@ -185,6 +185,8 @@ function addNarrative(text, isEvent, isPlayerInput) {
   }
   
   c.scrollTop = c.scrollHeight;
+  // [重试] 同步固定重试条显示状态
+  updateRetryBar();
 }
 
 // [v11] 撤销最后一次行动：删除玩家输入及随后的AI叙事
@@ -257,6 +259,8 @@ async function undoLastAction(playerInputDiv) {
   }
   $('ot').textContent = '选择你的行动：';
   clearOpts();
+  // [重试] 撤销后同步固定重试条（_lastNarrativeWrapper 已重置，固定条应隐藏）
+  updateRetryBar();
 }
 
 function addSystem(text) {
@@ -376,6 +380,26 @@ function restoreHistory(history, images) {
     imgIndex++;
   }
   addSystem('已加载 ' + history.length + ' 条历史记录' + (imgList.length ? '，' + imgList.length + ' 张图片' : ''));
+
+  // [v12.7] 加载存档后启用重试：定位最后一条含 player_input 的叙事，显示固定重试条
+  // 修复：加载存档后桌面 hover 重试按钮在手机上不可见，且最后一条若是 event 则
+  // _lastNarrativeWrapper 为空导致固定重试条不显示 → 用户只能"撤销+手动重发"，
+  // 手动重发无 retry 语义产生重复轮次
+  var lastRetryInput = '';
+  for (var hi = history.length - 1; hi >= 0; hi--) {
+    if (history[hi] && history[hi].type === 'narrative' && history[hi].player_input) {
+      lastRetryInput = history[hi].player_input;
+      break;
+    }
+  }
+  if (lastRetryInput) {
+    _lastPlayerInput = lastRetryInput;
+    var wrappers = document.querySelectorAll('#nb .ai-narrative-wrapper');
+    if (wrappers.length) {
+      _lastNarrativeWrapper = wrappers[wrappers.length - 1];
+    }
+    updateRetryBar();
+  }
 }
 
 function showOpts(opts) {
@@ -640,30 +664,62 @@ function toggleRightPanel() {
   right.classList.toggle('show');
 }
 
-// [Bug] 重试功能：用相同输入重新生成叙事，替换当前叙事
-async function retryNarrative(btn) {
-  if (!_lastPlayerInput) return;
-  // 找到这个按钮所属的 ai-narrative-wrapper
-  var wrapper = btn.closest('.ai-narrative-wrapper');
-  if (!wrapper) return;
-  // 禁用按钮，显示加载状态
-  btn.disabled = true;
-  btn.innerHTML = '⏳ 生成中...';
+// [重试] 核心逻辑：用相同输入重新生成叙事，替换目标 wrapper 内容
+// wrapper: 要替换内容的 ai-narrative-wrapper；btn: 触发按钮（可为 null，固定条按钮时传入）
+async function retryNarrativeCore(wrapper, btn) {
+  if (!_lastPlayerInput || !wrapper) return;
+  if (btn) { btn.disabled = true; btn.innerHTML = '⏳ 生成中...'; }
   try {
-    var d = await api('POST', '/api/input', { input: _lastPlayerInput });
-    if (d.error) { btn.innerHTML = '❌ 失败'; btn.disabled = false; return; }
+    // [v12.1] retry: true → 后端回滚到输入前快照再重新生成，不再重复推进状态/累积历史
+    var d = await api('POST', '/api/input', { input: _lastPlayerInput, retry: true });
+    if (d.error) {
+      if (btn) { btn.innerHTML = '❌ 失败'; btn.disabled = false; }
+      return;
+    }
     var r = d.result || d;
     // 更新全局状态
     if (d.state) GS = d.state;
     updateStatus();
-    // 构建新的叙事HTML
+    // [v12.7] 修复"重试后上下重复"：一次叙事渲染成多个段落 wrapper，
+    // 原先只替换最后一段 wrapper 导致旧叙事前段残留 + 新叙事全部叠加。
+    // 现在定位本次叙事起点（最后一个 player-input 之后），删除其后的所有
+    // wrapper/段落，再整体渲染新内容，保证界面与后端一致。
+    var nb = $('nb');
+    var lastInputDiv = null;
+    // 用 wrapper 定位：从 wrapper 向前找最近的 player-input
+    var cursor = wrapper;
+    while (cursor && cursor !== nb) {
+      cursor = cursor.previousElementSibling;
+      if (cursor && cursor.classList && cursor.classList.contains('player-input')) {
+        lastInputDiv = cursor;
+        break;
+      }
+    }
+    if (lastInputDiv) {
+      // 删除 player-input 之后的所有节点（旧叙事的所有段落 wrapper/事件）
+      var children = Array.from(nb.children);
+      var startIdx = children.indexOf(lastInputDiv);
+      for (var j = children.length - 1; j > startIdx; j--) {
+        if (children[j].parentNode) children[j].remove();
+      }
+    } else {
+      // 找不到 player-input（异常情况），回退为只替换 wrapper 自身
+      wrapper.innerHTML = '';
+    }
+    // 构建新的叙事HTML并追加（与 addNarrative 结构一致：段落带 ai-narrative-wrapper）
     var newHtml = '';
     if (r.narrative) {
       var paragraphs = r.narrative.split(/\n{2,}/);
+      var paraIdx = 0;
+      var totalParas = paragraphs.filter(function(p){ return p.trim(); }).length;
       paragraphs.forEach(function(para) {
         para = para.trim();
         if (!para) return;
+        paraIdx++;
         var parts = parseDialogue(para);
+        var isLastPara = (paraIdx === totalParas);
+        // 每个段落一个 wrapper（对话与叙事段共用），保持与 addNarrative 相同的 DOM 结构
+        newHtml += '<div class="ai-narrative-wrapper">';
         parts.forEach(function(part) {
           if (part.type === 'dialogue' && part.speaker) {
             newHtml += '<div class="npc-dialog"><div class="speaker">' + escHtml(part.speaker) + '</div><div class="dialog-text">' + sanitizeHTML(part.text).replace(/\n/g, '<br>') + '</div></div>';
@@ -671,17 +727,74 @@ async function retryNarrative(btn) {
             newHtml += '<p class="ai-narrative">' + sanitizeHTML(part.text).replace(/\n/g, '<br>') + '</p>';
           }
         });
+        // 只在最后一个段落 wrapper 内添加重试按钮
+        if (isLastPara) {
+          newHtml += '<button class="retry-btn" onclick="retryNarrative(this)" title="用相同输入重新生成">🔄 重试</button>';
+        }
+        newHtml += '</div>';
       });
     }
-    // 添加重试按钮
-    newHtml += '<button class="retry-btn" onclick="retryNarrative(this)" title="用相同输入重新生成">🔄 重试</button>';
-    // 替换内容
-    wrapper.innerHTML = newHtml;
+    // 渲染新叙事（与 addNarrative 相同的 wrapper 结构，保证 _lastNarrativeWrapper 正确指向最后一段）
+    var temp = document.createElement('div');
+    temp.innerHTML = newHtml;
+    var frag = document.createDocumentFragment();
+    while (temp.firstChild) frag.appendChild(temp.firstChild);
+    // 更新 _lastNarrativeWrapper：最后一个 .ai-narrative-wrapper
+    _lastNarrativeWrapper = null;
+    var lastWrapper = null;
+    Array.prototype.forEach.call(frag.children, function(child) {
+      if (child.classList && child.classList.contains('ai-narrative-wrapper')) {
+        lastWrapper = child;
+      }
+    });
+    if (lastWrapper) _lastNarrativeWrapper = lastWrapper;
+    nb.appendChild(frag);
+    if (nb.scrollTop !== undefined) nb.scrollTop = nb.scrollHeight;
+    // 固定条按钮恢复空闲状态
+    var barBtn = $('retryBarBtn');
+    if (barBtn) { barBtn.disabled = false; barBtn.innerHTML = '🔄 重试上次行动'; }
     // 处理其他响应
     if (r.auto_event) addNarrative(r.auto_event.narrative, true);
     if (r.options && r.options.length) showOpts(r.options);
   } catch(e) {
-    btn.innerHTML = '❌ 失败';
-    btn.disabled = false;
+    if (btn) { btn.innerHTML = '❌ 失败'; btn.disabled = false; }
+    var barBtn2 = $('retryBarBtn');
+    if (barBtn2) { barBtn2.disabled = false; barBtn2.innerHTML = '🔄 重试上次行动'; }
+  }
+  updateRetryBar();
+}
+
+// [Bug] 重试功能：用相同输入重新生成叙事，替换当前叙事（桌面悬停按钮）
+async function retryNarrative(btn) {
+  if (!_lastPlayerInput) return;
+  // 找到这个按钮所属的 ai-narrative-wrapper
+  var wrapper = btn.closest('.ai-narrative-wrapper');
+  if (!wrapper) return;
+  await retryNarrativeCore(wrapper, btn);
+}
+
+// [重试] 固定重试条：重试最后一段叙事（移动端常驻按钮，无需悬停）
+async function retryLastNarrative() {
+  if (!_lastPlayerInput) return;
+  var wrapper = _lastNarrativeWrapper;
+  if (!wrapper || !document.body.contains(wrapper)) {
+    // wrapper 已不在 DOM（如被撤销），隐藏固定条并退出
+    updateRetryBar();
+    return;
+  }
+  var btn = $('retryBarBtn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '⏳ 生成中...'; }
+  await retryNarrativeCore(wrapper, btn);
+}
+
+// [重试] 更新固定重试条显示状态：有最后玩家输入且最后叙事仍在 DOM 时显示
+function updateRetryBar() {
+  var bar = $('retryBar');
+  if (!bar) return;
+  var show = !!(_lastPlayerInput && _lastNarrativeWrapper && document.body.contains(_lastNarrativeWrapper));
+  bar.style.display = show ? 'flex' : 'none';
+  if (show) {
+    var btn = $('retryBarBtn');
+    if (btn) { btn.disabled = false; btn.innerHTML = '🔄 重试上次行动'; }
   }
 }

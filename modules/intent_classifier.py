@@ -225,6 +225,14 @@ class TemplateGenerator:
                 location = loc_obj.location_name or loc_code
             elif hasattr(loc_obj, 'name'):
                 location = loc_obj.name or loc_code
+        # [2026-08-10 Bug] 玩家 location 缺省为英文 code（如 "village"）且不在 locations 表时，
+        # 模板直接渲染英文（"village在晨雾中苏醒"）。兜底映射为中文。
+        if location == loc_code and loc_code != "此处":
+            _LOC_FALLBACK = {
+                "village": "村庄", "town": "小镇", "city": "城池", "wilderness": "荒野",
+                "forest": "树林", "mountain": "山间", "river": "河边", "road": "路边",
+            }
+            location = _LOC_FALLBACK.get(loc_code, loc_code)
         time = world_state.current_time if world_state else "此时"
         season = world_state.season if world_state else "春季"
         weather = world_state.weather if world_state else "晴朗"

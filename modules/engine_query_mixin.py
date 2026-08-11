@@ -30,6 +30,9 @@ class SubsystemQueryMixin:
     def get_npc_list(self: "GameEngine") -> list[dict]:
         result = []
         for npc_id, npc in self.npc_states.items():
+            # [功能二] 隐藏的 NPC 不出现在列表中
+            if getattr(npc, 'hidden', False):
+                continue
             rel = self.player_state.relations.get(npc.name) if self.player_state else None
             result.append({
                 "id": npc_id, "name": npc.name, "age": npc.age,

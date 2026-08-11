@@ -8,7 +8,7 @@
      In Alpine v3.15+, alpine:init fires synchronously during Alpine.start()
      which runs immediately after the Alpine script executes (defer order is
      preserved, but the listener must exist before the event is dispatched). -->
-<script defer src="/js/alpine-components.js?v=c605ab10"></script>
+<script defer src="/js/alpine-components.js?v=9c1e7d43"></script>
 <script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
 <script src="https://unpkg.com/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
 <title>太虚幻境 - 虚拟世界人生模拟器</title>
@@ -496,6 +496,7 @@
 <div class="abtn" onclick="doButterfly()">🦋 蝴蝶效应</div>
 <div class="abtn" onclick="openAddNpc()">➕ 添加角色</div>
 <div class="abtn" onclick="openEditNpc()">✏️ 修改角色</div>
+<div class="abtn" onclick="openAiCommand()">🤖 给AI下命令</div>
 <div class="abtn" onclick="openOutputLog()">📋 输出汇总</div>
 <div class="abtn" onclick="toggleNpcChatPanel()">💬 角色聊天</div>
 </div>
@@ -504,6 +505,9 @@
 </div>
 
 <div class="opts">
+<div class="retry-bar" id="retryBar" style="display:none">
+<button class="retry-bar-btn" id="retryBarBtn" onclick="retryLastNarrative()">🔄 重试上次行动</button>
+</div>
 <div class="opts-title" id="ot">选择你的行动</div>
 <div class="opts-grid" id="og"></div>
 <div class="cust"><textarea id="ci" rows="2" placeholder="自由输入你的行动...（Enter发送，Shift+Enter换行）" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();doCustom()}"></textarea><button onclick="doCustom()">行动</button></div>
@@ -553,27 +557,7 @@
     <div id="test_result_llm" style="font-size:.8em;margin-top:6px;display:none;padding:8px 10px;border-radius:6px"></div>
   </div>
 
-  <!-- ⚡ 廉价模型 -->
-  <div class="settings-section">
-    <div class="settings-section-title">⚡ 廉价模型</div>
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
-      <label style="font-size:.88em;color:var(--dim)"><input type="checkbox" id="st_cheap_enabled" x-model="config.cheap_llm.enabled"> 启用备用模型（简单任务用此模型，省钱更快）</label>
-    </div>
-    <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
-      <select id="st_cheap_profile" onchange="applyProfile('cheap')" style="flex:1;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"></select>
-      <button onclick="deleteProfile('cheap')" style="padding:8px 12px;background:#5a2a2a;border:1px solid #9a5a5a;border-radius:8px;color:#c96e6e;font-size:.82em;cursor:pointer">删除</button>
-    </div>
-    <div class="fg"><label>API Key</label><input type="password" id="st_cheap_lk" x-model="config.cheap_llm.api_key" placeholder="留空则不启用"></div>
-    <div class="fg"><label>Base URL</label><input type="text" id="st_cheap_lb" x-model="config.cheap_llm.base_url" placeholder="https://api.deepseek.com/v1"></div>
-    <div class="fg"><label>模型名称</label><input type="text" id="st_cheap_lm" x-model="config.cheap_llm.model_name" placeholder="如 deepseek-chat"></div>
-    <div style="display:flex;gap:8px;margin-top:8px">
-      <input type="text" id="st_cheap_pname" placeholder="配置名称" style="flex:1;padding:8px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.85em">
-      <button onclick="saveProfile('cheap')" style="padding:8px 16px;background:var(--gold);border:none;border-radius:8px;color:#0d0c0f;font-weight:700;font-size:.85em;cursor:pointer">存为配置</button>
-      <button onclick="testConnection('cheap')" id="btn_test_cheap" style="padding:8px 14px;background:rgba(110,169,201,.15);border:1px solid rgba(110,169,201,.4);border-radius:8px;color:#6ea9c9;font-size:.85em;cursor:pointer;white-space:nowrap">🔌 测试联通</button>
-    </div>
-    <div id="test_result_cheap" style="font-size:.8em;margin-top:6px;display:none;padding:8px 10px;border-radius:6px"></div>
-    <div style="font-size:.78em;color:var(--dim);margin-top:8px;padding:8px 10px;background:rgba(212,175,55,.05);border-radius:6px">💡 简单任务（分类/评分）优先用廉价模型；主模型失败时自动降级</div>
-  </div>
+  <!-- [2026-08-10] ⚡ 廉价模型设置块已移除：所有调用统一走主模型，减少配置出错面 -->
 
   <!-- [v11] 对话模型已屏蔽，所有内容走主力模型
   <div class="settings-section">
@@ -652,12 +636,20 @@
         <option value="网文爽文">网文爽文 — 快节奏，爽点密集</option>
         <option value="诗化散文">诗化散文 — 意境优先，诗意优美</option>
         <option value="真人作者">真人作者 — 对话驱动，多视角信息差</option>
-        <option value="自定义">✏️ 自定义风格...</option>
+        <option value="自定义1">✏️ 自定义风格1</option>
+        <option value="自定义2">✏️ 自定义风格2</option>
+        <option value="自定义3">✏️ 自定义风格3</option>
       </select>
     </div>
     <div id="custom_style_section" style="margin-bottom:12px;display:none">
-      <div class="fg"><label>自定义风格描述</label>
-        <textarea id="st_custom_style" rows="4" placeholder="描述你想要的写作风格，例如：使用短句为主，节奏明快；对话丰富，注重人物语言描写" style="width:100%;padding:10px 12px;background:var(--panel-light);border:1px solid var(--gold);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea>
+      <div class="fg"><label>自定义风格1</label>
+        <textarea id="st_custom_style_1" rows="3" oninput="updateStylePreview()" placeholder="描述风格1的写作要求，例如：短句为主，节奏明快；对话丰富，注重人物语言描写" style="width:100%;padding:10px 12px;background:var(--panel-light);border:1px solid var(--gold);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea>
+      </div>
+      <div class="fg"><label>自定义风格2</label>
+        <textarea id="st_custom_style_2" rows="3" oninput="updateStylePreview()" placeholder="描述风格2的写作要求，例如：长句为主，多重从句嵌套，信息密集" style="width:100%;padding:10px 12px;background:var(--panel-light);border:1px solid var(--gold);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea>
+      </div>
+      <div class="fg"><label>自定义风格3</label>
+        <textarea id="st_custom_style_3" rows="3" oninput="updateStylePreview()" placeholder="描述风格3的写作要求" style="width:100%;padding:10px 12px;background:var(--panel-light);border:1px solid var(--gold);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea>
       </div>
       <div style="display:flex;gap:8px">
         <button onclick="uploadStyleFile()" class="upload-btn">📎 上传风格文件(.txt)</button>
@@ -674,7 +666,7 @@
     <div class="fg">
       <select id="st_narrative_perspective" x-model="config.game.narrative_perspective" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em">
         <option value="second">第二人称 — "你"（沉浸感强，推荐）</option>
-        <option value="third">第三人称 — 角色名（如"张立"、"凌云"）</option>
+        <option value="third">第三人称 — 角色名（如"玩家姓名"、"角色名"）</option>
         <option value="first">第一人称 — "我"（内心独白感）</option>
       </select>
       <div style="font-size:.75em;color:var(--dim);margin-top:4px">统一叙事中的人称，避免混用"你"和角色名导致混乱。</div>
@@ -700,12 +692,12 @@
     <div class="fg">
       <label>每次叙事长度</label>
       <div style="display:flex;align-items:center;gap:8px">
-        <input type="range" id="st_narrative_chars_slider" min="200" max="3000" step="100" value="1000" style="flex:1" oninput="onNarrativeCharsSlider()">
-        <span id="st_narrative_chars_value" style="min-width:50px;text-align:center;color:var(--gold);font-weight:600">1000</span>
+        <input type="range" id="st_narrative_chars_slider" min="200" max="3000" step="100" value="2000" style="flex:1" oninput="onNarrativeCharsSlider()">
+        <span id="st_narrative_chars_value" style="min-width:50px;text-align:center;color:var(--gold);font-weight:600">2000</span>
         <span style="color:var(--dim);font-size:.85em">字</span>
       </div>
       <div style="font-size:.75em;color:var(--dim);margin-top:4px">控制AI每次输出的叙事长度。较短=响应更快，较长=剧情更丰富</div>
-      <input type="hidden" id="st_narrative_max_chars" value="1000">
+      <input type="hidden" id="st_narrative_max_chars" value="2000">
     </div>
   </div>
 
@@ -1256,19 +1248,19 @@
 <div id="editNpcForm" style="display:none">
 <div class="fg"><label>名字</label><input type="text" id="edit_npc_name"></div>
 <div class="fg"><label>年龄</label><input type="number" id="edit_npc_age" min="1" max="200"></div>
-<div class="fg"><label>职业/身份</label><input type="text" id="edit_npc_role"></div>
-<div class="fg"><label>MBTI性格类型</label><input type="text" id="edit_npc_mbti" placeholder="例：INTJ、ENFP"></div>
-<div class="fg"><label>性格描述</label><textarea id="edit_npc_personality" rows="2" style="width:100%;padding:10px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
-<div class="fg"><label>说话风格</label><input type="text" id="edit_npc_speaking"></div>
-<div class="fg"><label>对话示例（每行一句）</label><textarea id="edit_npc_examples" rows="3" style="width:100%;padding:10px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
-<div class="fg"><label>所在位置</label><input type="text" id="edit_npc_location"></div>
-<div style="display:flex;gap:10px">
+<div class="fg npc-only"><label>职业/身份</label><input type="text" id="edit_npc_role"></div>
+<div class="fg npc-only"><label>MBTI性格类型</label><input type="text" id="edit_npc_mbti" placeholder="例：INTJ、ENFP"></div>
+<div class="fg npc-only"><label>性格描述</label><textarea id="edit_npc_personality" rows="2" style="width:100%;padding:10px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
+<div class="fg npc-only"><label>说话风格</label><input type="text" id="edit_npc_speaking"></div>
+<div class="fg npc-only"><label>对话示例（每行一句）</label><textarea id="edit_npc_examples" rows="3" style="width:100%;padding:10px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em;outline:none;resize:vertical;font-family:inherit"></textarea></div>
+<div class="fg npc-only"><label>所在位置</label><input type="text" id="edit_npc_location"></div>
+<div class="npc-only" style="display:flex;gap:10px">
 <div class="fg" style="flex:1"><label>与玩家关系</label><select id="edit_npc_relation" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"><option value="陌生人">陌生人</option><option value="朋友">朋友</option><option value="师徒">师徒</option><option value="下属">下属</option><option value="爱人">爱人</option><option value="亲人">亲人</option><option value="敌人">敌人</option><option value="同门">同门</option><option value="主仆">主仆</option><option value="邻居">邻居</option><option value="生意伙伴">生意伙伴</option><option value="恩人">恩人</option><option value="仇人">仇人</option><option value="青梅竹马">青梅竹马</option><option value="未婚夫妻">未婚夫妻</option><option value="义兄弟">义兄弟</option></select></div>
 <div class="fg" style="flex:1"><label>好感度 (0-100)</label><input type="number" id="edit_npc_favor" min="0" max="100"></div>
 </div>
-<div class="fg"><label>标签（逗号分隔）</label><input type="text" id="edit_npc_tags"></div>
-<h3 style="color:var(--accent);font-size:.85em;margin:14px 0 8px;padding-bottom:6px;border-bottom:1px solid var(--border)">⚔️ 战斗属性</h3>
-<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+<div class="fg npc-only"><label>标签（逗号分隔）</label><input type="text" id="edit_npc_tags"></div>
+<h3 class="npc-only" style="color:var(--accent);font-size:.85em;margin:14px 0 8px;padding-bottom:6px;border-bottom:1px solid var(--border)">⚔️ 战斗属性</h3>
+<div class="npc-only" style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
 <div class="fg"><label>生命</label><input type="number" id="edit_stat_health" min="0"></div>
 <div class="fg"><label>最大生命</label><input type="number" id="edit_stat_max_health" min="1"></div>
 <div class="fg"><label>力量</label><input type="number" id="edit_stat_strength" min="0"></div>
@@ -1276,12 +1268,23 @@
 <div class="fg"><label>智力</label><input type="number" id="edit_stat_intelligence" min="0"></div>
 <div class="fg"><label>幸运</label><input type="number" id="edit_stat_luck" min="0"></div>
 </div>
-<h3 style="color:var(--accent);font-size:.85em;margin:14px 0 8px;padding-bottom:6px;border-bottom:1px solid var(--border)">🧠 AI行为</h3>
-<div class="fg"><label>当前目标</label><input type="text" id="edit_ai_goal"></div>
-<div class="fg"><label>长期目标</label><input type="text" id="edit_ai_long_goal"></div>
-<div class="fg"><label>决策风格</label><select id="edit_ai_style" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"><option value="normal">普通</option><option value="cautious">谨慎</option><option value="aggressive">激进</option><option value="passive">被动</option><option value="cunning">狡诈</option></select></div>
+<h3 class="npc-only" style="color:var(--accent);font-size:.85em;margin:14px 0 8px;padding-bottom:6px;border-bottom:1px solid var(--border)">🧠 AI行为</h3>
+<div class="fg npc-only"><label>当前目标</label><input type="text" id="edit_ai_goal"></div>
+<div class="fg npc-only"><label>长期目标</label><input type="text" id="edit_ai_long_goal"></div>
+<div class="fg npc-only"><label>决策风格</label><select id="edit_ai_style" style="width:100%;padding:9px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.88em"><option value="normal">普通</option><option value="cautious">谨慎</option><option value="aggressive">激进</option><option value="passive">被动</option><option value="cunning">狡诈</option></select></div>
+<button class="btn npc-only" id="btn_toggle_hide_npc" onclick="toggleHideNpc()" data-hidden="0" style="margin-top:12px;width:100%;background:var(--panel-light);border:1px solid var(--border);color:var(--text)">🙈 隐藏角色</button>
 <button class="btn" onclick="doEditNpc()" style="margin-top:16px;width:100%">💾 保存修改</button>
 </div>
+</div></div>
+
+<div class="modal" id="aiCommandModal"><div class="modal-box" style="width:560px"><span class="close" onclick="closeAiCommand()">&times;</span><h2>🤖 给AI下命令</h2>
+<div style="font-size:.85em;color:var(--dim);margin-bottom:10px;line-height:1.6">告诉AI你想做的事，AI 会读取世界设定并执行。例：<br>· 「把梦璃加入NPC，她是我的召唤灵」<br>· 「给许掌柜增加一个秘密」<br>· 「让临水镇出现一位神秘的算命先生」</div>
+<div class="fg"><label>指令</label><textarea id="ai_cmd_input" rows="3" style="width:100%;padding:10px 12px;background:var(--panel-light);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.9em" placeholder="例：把梦璃加入NPC档案，她是陈度的召唤灵…"></textarea></div>
+<div style="display:flex;gap:8px;margin:12px 0;align-items:center">
+  <button onclick="sendAiCommand()" style="padding:8px 18px;background:var(--gold);border:none;border-radius:6px;color:#0d0c0f;font-weight:600;font-size:.88em;cursor:pointer">🚀 执行指令</button>
+  <span id="ai_cmd_status" style="color:var(--gold);font-size:.82em;line-height:1.5"></span>
+</div>
+<div id="ai_cmd_result" style="display:none;margin-top:4px"></div>
 </div></div>
 
 <div id="toast" x-show="$store.app.toast" x-transition.opacity.duration.300ms
@@ -1710,16 +1713,16 @@
 </div></div>
 
 <script src="/js/dom.js?v=d0c0eb68"></script>
-<script src="/js/core.js?v=da9b7ecf"></script>
+<script src="/js/core.js?v=da9b7ef0"></script>
 <script src="/js/bg-manager.js?v=e27e45d9"></script>
-<script src="/js/ui.js?v=d6c55ba8"></script>
+<script src="/js/ui.js?v=3a1c9d72"></script>
 <script src="/js/game-utils.js?v=98bfba70"></script>
 <script src="/js/game-world.js?v=3327df02"></script>
-<script src="/js/game-npc.js?v=j1e2f3a4"></script>
+<script src="/js/game-npc.js?v=6b3a2f91"></script>
 <script src="/js/game-panels.js?v=b1c2d3e4"></script>
-<script src="/js/game.js?v=33f0d908"></script>
-<script src="/js/config-shared.js?v=ddece993"></script>
-<script src="/js/settings.js?v=b90122d4"></script>
+<script src="/js/game.js?v=33f0d90a"></script>
+<script src="/js/config-shared.js?v=7b2e5c81"></script>
+<script src="/js/settings.js?v=4f8a3d62"></script>
 <script src="/js/v10_panel.js?v=d2ad7361"></script>
 <script src="/js/npc_prediction.js?v=27315a45"></script>
 <script src="/js/auto_run.js?v=33846113"></script>

@@ -38,6 +38,8 @@ class StateSnapshot:
     parent_snapshot_id: int | None = None  # 父快照（分支起点）
     divergence_point: bool = False         # 是否是分歧点
     is_active: bool = True                 # 是否属于当前活跃分支
+    # [v12.7] 辅助状态（npc_registry/character_state_manager 等不在 player/world/npc 快照内的状态）
+    aux_state: dict = field(default_factory=dict)
 
 
 class StateHistoryManager:
@@ -69,9 +71,18 @@ class StateHistoryManager:
                 branch_id TEXT DEFAULT 'main',
                 parent_snapshot_id INTEGER,
                 divergence_point INTEGER DEFAULT 0,
-                is_active INTEGER DEFAULT 1
+                is_active INTEGER DEFAULT 1,
+                aux_state TEXT
             )
         """)
+
+        # [v12.7] 旧库补列（已存在的表没有 aux_state 列）
+        try:
+            cols = [c[1] for c in cursor.execute("PRAGMA table_info(state_snapshots)").fetchall()]
+            if "aux_state" not in cols:
+                cursor.execute("ALTER TABLE state_snapshots ADD COLUMN aux_state TEXT")
+        except Exception:
+            pass
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS narrative_history (
@@ -101,6 +112,26 @@ class StateHistoryManager:
             ON narrative_history(world_id, turn)
         """)
 
+        # [v12.1] 记忆层快照表：撤销/重试时整体回滚记忆层（chroma/briefs/摘要/事件日志/NPC记忆）
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                world_id TEXT NOT NULL,
+                turn INTEGER NOT NULL,
+                timestamp TEXT NOT NULL,
+                chroma_ids TEXT,
+                briefs TEXT,
+                summaries TEXT,
+                event_max_id INTEGER DEFAULT 0,
+                npc_procedural TEXT
+            )
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memory_snapshots_world_turn
+            ON memory_snapshots(world_id, turn)
+        """)
+
         # [v12] 分支索引
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_snapshots_branch
@@ -116,8 +147,9 @@ class StateHistoryManager:
                      diff_summary: str = "",
                      branch_id: str = "main",
                      parent_snapshot_id: int = None,
-                     divergence_point: bool = False):
-        """保存一个状态快照（[v12] 支持分支）"""
+                     divergence_point: bool = False,
+                     aux_state: dict = None):
+        """保存一个状态快照（[v12] 支持分支，[v12.7] 支持辅助状态）"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
@@ -132,8 +164,8 @@ class StateHistoryManager:
             INSERT INTO state_snapshots
             (world_id, turn, day, time, timestamp, player_state, world_state,
              npc_states, narrative_text, player_input, diff_summary,
-             branch_id, parent_snapshot_id, divergence_point, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             branch_id, parent_snapshot_id, divergence_point, is_active, aux_state)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             world_id, turn, day, time,
             datetime.now().isoformat(),
@@ -143,6 +175,7 @@ class StateHistoryManager:
             narrative, player_input, diff_summary,
             branch_id, parent_snapshot_id,
             1 if divergence_point else 0, 1,
+            json.dumps(aux_state or {}, ensure_ascii=False),
         ))
 
         conn.commit()
@@ -172,6 +205,94 @@ class StateHistoryManager:
 
         conn.commit()
         conn.close()
+
+    def delete_snapshot(self, world_id: str, turn: int) -> int:
+        """[v12.1] 删除指定回合的状态快照（重试覆盖用，避免同 turn 累积多条）"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM state_snapshots WHERE world_id = ? AND turn = ?",
+            (world_id, turn),
+        )
+        n = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return n
+
+    def delete_narrative_entries(self, world_id: str, turn: int) -> int:
+        """[v12.1] 删除指定回合的叙事记录（重试覆盖用，避免同 turn 累积多条）"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM narrative_history WHERE world_id = ? AND turn = ?",
+            (world_id, turn),
+        )
+        n = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return n
+
+    # ── [v12.1] 记忆层快照（撤销/重试整体回滚记忆层） ────────────────
+
+    def save_memory_snapshot(self, world_id: str, turn: int,
+                             chroma_ids: dict = None, briefs: dict = None,
+                             summaries: list = None, event_max_id: int = 0,
+                             npc_procedural: str = "") -> None:
+        """保存指定回合的记忆层快照（覆盖写入同 turn）"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM memory_snapshots WHERE world_id = ? AND turn = ?",
+            (world_id, turn),
+        )
+        cursor.execute("""
+            INSERT INTO memory_snapshots
+            (world_id, turn, timestamp, chroma_ids, briefs, summaries, event_max_id, npc_procedural)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            world_id, turn, datetime.now().isoformat(),
+            json.dumps(chroma_ids or {}, ensure_ascii=False),
+            json.dumps(briefs or {}, ensure_ascii=False),
+            json.dumps(summaries or [], ensure_ascii=False),
+            event_max_id or 0,
+            npc_procedural or "",
+        ))
+        conn.commit()
+        conn.close()
+
+    def get_memory_snapshot(self, world_id: str, turn: int) -> Optional[dict]:
+        """获取指定回合的记忆层快照（返回 dict，无则 None）"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT chroma_ids, briefs, summaries, event_max_id, npc_procedural "
+            "FROM memory_snapshots WHERE world_id = ? AND turn = ?",
+            (world_id, turn),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {
+            "chroma_ids": json.loads(row[0]) if row[0] else {},
+            "briefs": json.loads(row[1]) if row[1] else {},
+            "summaries": json.loads(row[2]) if row[2] else [],
+            "event_max_id": row[3] or 0,
+            "npc_procedural": row[4] or "",
+        }
+
+    def delete_memory_snapshots_after(self, world_id: str, turn: int) -> int:
+        """删除指定回合之后的记忆快照（回滚后清理，保持一致性）"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM memory_snapshots WHERE world_id = ? AND turn > ?",
+            (world_id, turn),
+        )
+        n = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return n
 
     def get_snapshot(self, world_id: str, turn: int) -> Optional[StateSnapshot]:
         """获取指定回合的快照"""
@@ -437,6 +558,7 @@ class StateHistoryManager:
             parent_snapshot_id=parent_id,
             divergence_point=div_point,
             is_active=is_active,
+            aux_state=json.loads(row[16]) if len(row) > 16 and row[16] else {},
         )
 
     # ── [v12] 分支管理（Letta式Git版本控制） ────────────────

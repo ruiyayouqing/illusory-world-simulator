@@ -19,17 +19,23 @@ _CONTROL_CHARS_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\u200b-\u200f\ufeff\
 # 这里不做语义黑名单，依靠 fence 包裹 + system prompt 约束
 
 
-def sanitize_player_input(text: str, max_len: int = 500) -> str:
+def sanitize_player_input(text: str, max_len: int = 3000) -> str:
     """[v1.4 P2-10] 轻量 player_input 清洗，防止 prompt injection
 
     做三件事（不做语义过滤，避免误伤中文）：
-      1. 长度截断到 max_len（统一上限，覆盖散落的 [:200]/[:400]）
-      2. 去除控制字符与零宽字符（防 unicode 隐藏指令）
-      3. 用 fence 分隔符包裹，让 LLM 看到玩家输入的边界
+     1. 长度截断到 max_len（统一上限，覆盖散落的 [:200]/[:400]）
+     2. 去除控制字符与零宽字符（防 unicode 隐藏指令）
+     3. 用 fence 分隔符包裹，让 LLM 看到玩家输入的边界
+
+    [2026-08-10] max_len 默认 500 → 3000：玩家长输入（如一次完整的
+    行程/事件描述 600+ 字）在 500 处被截断，后半段关键情节（人物性别、
+    事件细节）丢失，导致 AI 生成的叙事与输入对不上。放宽到 3000 字符
+    （约 1500 汉字），覆盖正常游戏输入上限；ContextEngine 中
+    player_input 层 priority=2 且 compressible=False，不会被预算压缩。
 
     Args:
         text: 玩家原始输入
-        max_len: 最大长度，默认 500（约 250 个汉字）
+        max_len: 最大长度，默认 3000
 
     Returns:
         清洗后的字符串，形如：
@@ -310,7 +316,7 @@ def build_history_context(player_input: str, narrative_history: list[dict],
     
     for entry in recent:
         text = entry.get("text", "")[:600]
-        pi = entry.get("player_input", "")[:200]
+        pi = entry.get("player_input", "")[:600]  # [2026-08-10] 200→600：历史上下文保留更多玩家输入，避免关键情节丢失
         if not text:
             continue
         matched = any(kw in text or kw in pi for kw in keywords) if keywords else False

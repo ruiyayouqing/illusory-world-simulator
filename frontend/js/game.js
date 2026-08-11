@@ -426,7 +426,7 @@ function handleSlashCommand(cmd) {
   }
 }
 
-async function sendInput(t, fromOption) {
+async function sendInput(t, fromOption, retry) {
   actionCount++;
   $('ot').textContent = '思考中...';
 
@@ -450,13 +450,13 @@ async function sendInput(t, fromOption) {
 
   // 如果 WebSocket 已连接且流式输出启用，使用流式模式
   if (streamingEnabled && ws && ws.readyState === WebSocket.OPEN) {
-    return sendInputStream(t);
+    return sendInputStream(t, retry);
   }
   // 否则使用传统 HTTP 模式
-  return sendInputHTTP(t);
+  return sendInputHTTP(t, retry);
 }
 
-function sendInputStream(t) {
+function sendInputStream(t, retry) {
   // 准备流式渲染
   var nb = $('nb');
   var streamP = document.createElement('p');
@@ -469,6 +469,10 @@ function sendInputStream(t) {
   var streamDone = false;
   var finalResult = null;
   var finalState = null;
+
+  // [v12.7] 记录本次是否为重试：重试时 processStreamResult 需先清理旧叙事块，
+  // 否则旧叙事（多段落 wrapper）残留 + 新叙事追加 → 界面"上下重复"
+  var _streamIsRetry = !!retry;
 
   wsOnToken = function(token) {
     streamText += token;
@@ -509,8 +513,8 @@ function sendInputStream(t) {
     }
   };
 
-  // 发送流式输入请求
-  sendWS({ type: 'stream_input', text: t });
+  // 发送流式输入请求（[v12.1] 重试带 retry 标记）
+  sendWS({ type: 'stream_input', text: t, retry: !!retry });
 
   // 设置超时回退（120秒后如果还没有流式响应，回退到 HTTP）
   var streamTimeout = setTimeout(function() {
@@ -518,7 +522,7 @@ function sendInputStream(t) {
       // 流式失败，清理并回退
       if (streamP.parentNode) streamP.remove();
       wsOnToken = null; wsOnResult = null; wsOnStreamEnd = null; wsOnThinking = null;
-      sendInputHTTP(t);
+      sendInputHTTP(t, retry);
     } else if (finalResult && !streamDone) {
       // [Bug] result 已到达但 stream_end 未到达，直接处理结果避免 UI 挂起
       streamP.innerHTML = sanitizeHTML(streamText).replace(/\n/g, '<br>');
@@ -548,6 +552,28 @@ function processStreamResult(result) {
       p.remove();
     }
   });
+
+  // [v12.7] 重试路径：先清理旧叙事块（最后一个 player-input 之后的所有节点），
+  // 再渲染新叙事，避免旧叙事残留 + 新叙事追加导致"上下重复"。
+  // HTTP retry 路径（ui.js retryNarrativeCore）已做同样清理。
+  if (typeof _streamIsRetry !== 'undefined' && _streamIsRetry) {
+    var nb2 = $('nb');
+    var lastInput = null;
+    var kids = Array.from(nb2.children);
+    for (var i = kids.length - 1; i >= 0; i--) {
+      if (kids[i].classList && kids[i].classList.contains('player-input')) {
+        lastInput = kids[i];
+        break;
+      }
+    }
+    if (lastInput) {
+      var startIdx = kids.indexOf(lastInput);
+      for (var j = kids.length - 1; j > startIdx; j--) {
+        if (kids[j].parentNode) kids[j].remove();
+      }
+    }
+    _streamIsRetry = false;
+  }
   // 显示叙事
   if (r.narrative) addNarrative(r.narrative, false, false);
   // [v1.6 P1-7] 显示长期记忆引用徽章
@@ -625,11 +651,30 @@ function processStreamResult(result) {
   if (typeof refreshPlannerPanel === 'function') refreshPlannerPanel();
 }
 
-async function sendInputHTTP(t) {
+async function sendInputHTTP(t, retry) {
   try {
-    var d = await api('POST', '/api/input', {input: t});
+    // [v12.1] 重试带 retry 标记：后端回滚到输入前快照再重新生成
+    var d = await api('POST', '/api/input', {input: t, retry: !!retry});
     if (d.error) { addNarrative(d.error); return; }
     var r = d.result;
+    // [v12.7] retry 路径先清理旧叙事块（最后一个 player-input 之后），避免"上下重复"
+    if (retry) {
+      var nbR = $('nb');
+      var kidsR = Array.from(nbR.children);
+      var lastInputR = null;
+      for (var iR = kidsR.length - 1; iR >= 0; iR--) {
+        if (kidsR[iR].classList && kidsR[iR].classList.contains('player-input')) {
+          lastInputR = kidsR[iR];
+          break;
+        }
+      }
+      if (lastInputR) {
+        var sIdx = kidsR.indexOf(lastInputR);
+        for (var jR = kidsR.length - 1; jR > sIdx; jR--) {
+          if (kidsR[jR].parentNode) kidsR[jR].remove();
+        }
+      }
+    }
     if (r.narrative) addNarrative(r.narrative, false, false);
     if (r.dice_result) showDice(r.dice_result);
     if (r.world_event) addSystem(r.world_event.description);
@@ -732,8 +777,8 @@ async function retryLastInput(originalInput) {
   // 移除重试按钮
   var container = $('retry-btn-container');
   if (container) container.remove();
-  // 重新发送输入
-  await sendInput(originalInput);
+  // 重新发送输入（[v12.1] retry=true：后端回滚到输入前快照再重新生成）
+  await sendInput(originalInput, false, true);
 }
 
 async function doSave() {

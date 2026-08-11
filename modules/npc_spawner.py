@@ -55,9 +55,9 @@ class NpcSpawner:
         if self._spawning:
             return {"status": "skipped", "reason": "already_spawning",
                     "current_count": len(eng.npc_states)}
-        if not eng.cheap_llm:
-            logger.warning("[NpcSpawner] cheap_llm 未配置，无法后台生成 NPC")
-            return {"status": "skipped", "reason": "no_cheap_llm",
+        if not eng.llm:
+            logger.warning("[NpcSpawner] LLM 未配置，无法后台生成 NPC")
+            return {"status": "skipped", "reason": "no_llm",
                     "current_count": len(eng.npc_states)}
         if not eng.world_state or not eng.player_state:
             return {"status": "skipped", "reason": "no_world_state",
@@ -175,7 +175,7 @@ class NpcSpawner:
         eng = self.engine
         if self._spawning:
             return {"status": "error", "error": "后台自动生成正在进行中，请稍候再试"}
-        if not eng.cheap_llm:
+        if not eng.llm:
             return {"status": "error", "error": "AI 服务未配置"}
         if not eng.world_state or not eng.player_state:
             return {"status": "error", "error": "世界未初始化"}
@@ -390,7 +390,7 @@ class NpcSpawner:
             # [Bug] 必须传 schema_hint，否则 chat_json 会追加硬编码的
             # {"narrative":..., "options":...} 格式约束，LLM 就不会返回 npcs 字段
             schema_hint = '{"npcs":[{"name":"姓名","role":"职业","age":25,"location":"地点","personality":"性格","speaking_style":"说话风格","faction":"势力","relation_to_player":"关系","initial_favor":50,"tags":["标签"],"long_term_goal":"长期目标"}]}'
-            result = eng.cheap_llm.chat_json(
+            result = eng.llm.chat_json(
                 prompt, temperature=0.8, max_tokens=4096, schema_hint=schema_hint,
             )
             if not result:
@@ -536,7 +536,7 @@ class NpcSpawner:
             # [Bug] 注入随机种子避免缓存命中（否则同一世界多次调用会返回相同结果）
             import time as _time, random as _random
             seed_hint = f"{int(_time.time()*1000)}-{_random.randint(1000, 9999)}"
-            result = eng.cheap_llm.chat_json(
+            result = eng.llm.chat_json(
                 prompt + f"\n【创意种子】{seed_hint}",
                 temperature=0.9, max_tokens=4096, schema_hint=schema_hint,
             )

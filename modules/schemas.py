@@ -160,6 +160,9 @@ class NPCState(BaseModel):
     # is_dormant=True 的 NPC 不会出现在场景中、不会被 NPCAgent 主循环处理，
     # 直到登场条件满足后才会被激活。
     is_dormant: bool = False
+    # [功能二] 玩家手动隐藏的 NPC：不出现在列表/聊天/场景中，不被主循环处理，
+    # 但数据完整保留（血缘/关系/记忆不动），可随时恢复。区别于 is_dormant（系统自动休眠）。
+    hidden: bool = False
     # [v1.2] 休眠开始日（is_dormant 翻转为 True 时记录，唤醒时用于计算休眠时长）
     # 唤醒时调用 LLM 做时间跳跃推演，输入休眠时长 + 期间世界大事，补齐断层
     dormant_since_day: int = 0
@@ -186,6 +189,14 @@ class NPCState(BaseModel):
     private_facts: list[dict] = Field(default_factory=list)
     # [v1.3] 标记是否已生成过私密档案（避免重复生成）
     private_facts_generated: bool = False
+
+    # [v12.7] NPC 时间戳（回滚用）：记录 NPC 首次/最近出场的 turn
+    # - first_seen_turn: 首次出现在叙事中的 turn；-1 = 世界初始 NPC（回滚永不删除）
+    # - last_seen_turn: 最近一次出现在叙事中的 turn；-1 = 从未出场
+    # 回滚到 target_turn 时：first_seen_turn > target 的 NPC 视为该轮新增 → 移除；
+    # last_seen_turn > target 的恢复为 target（仅回退出场记录，不删除既有 NPC）
+    first_seen_turn: int = -1
+    last_seen_turn: int = -1
 
     # ===== [v1.5 第二期] 动机/立场/血缘 =====
     # 6 类动机：survival/social/career/exploration/legacy/transcendence
